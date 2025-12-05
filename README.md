@@ -1,6 +1,6 @@
 # Paper Search MCP (Node.js) with SSE Transport
 
-## English|[中文](README-sc.md)
+## English | [中文](README-sc.md) | [한국어](README-ko.md)
 
 A Node.js Model Context Protocol (MCP) server with **Server-Sent Events (SSE)** transport for searching and downloading academic papers from multiple sources, including arXiv, Web of Science, PubMed, Google Scholar, Sci-Hub, ScienceDirect, Springer, Wiley, Scopus, and **13 academic platforms** in total.
 
@@ -52,8 +52,8 @@ A Node.js Model Context Protocol (MCP) server with **Server-Sent Events (SSE)** 
 
 ```bash
 # Clone repository
-git clone https://github.com/your-username/paper-search-mcp-nodejs.git
-cd paper-search-mcp-nodejs
+git clone https://github.com/jhleee/paper-search-mcp-nodejs-sse.git
+cd paper-search-mcp-nodejs-sse
 
 # Install dependencies
 npm install
@@ -117,7 +117,7 @@ PORT=8080 HOST=0.0.0.0 npm start
 
 The server will start with the following endpoints:
 - **SSE endpoint**: `http://localhost:3000/sse` - For MCP protocol communication
-- **Message endpoint**: `http://localhost:3000/message` - For client-to-server messages
+- **Message endpoint**: `http://localhost:3000/messages` - For client-to-server messages (with sessionId)
 - **Health check**: `http://localhost:3000/health` - Server health status
 
 #### Method 2: Environment Variables
@@ -128,6 +128,25 @@ export HOST=localhost     # Default: localhost
 
 # Start the server
 npm start
+```
+
+#### Method 3: Docker (Recommended for Production)
+```bash
+# Build and run with Docker Compose
+docker-compose up -d
+
+# Or build manually
+docker build -t paper-search-mcp-sse .
+docker run -d -p 3000:3000 \
+  -e WOS_API_KEY=your_key \
+  -e PUBMED_API_KEY=your_key \
+  paper-search-mcp-sse
+
+# Check logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
 ```
 
 ### MCP Server Configuration
@@ -495,7 +514,7 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## 🐛 Issue Reporting
 
-If you encounter issues, please report them at [GitHub Issues](https://github.com/your-username/paper-search-mcp-nodejs/issues).
+If you encounter issues, please report them at [GitHub Issues](https://github.com/jhleee/paper-search-mcp-nodejs-sse/issues).
 
 ## 🙏 Acknowledgments
 

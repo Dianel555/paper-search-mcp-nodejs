@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  paper-search-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: paper-search-mcp-sse
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      # API Keys - set these in .env file or pass directly
+      - WOS_API_KEY=${WOS_API_KEY:-}
+      - WOS_API_VERSION=${WOS_API_VERSION:-v1}
+      - PUBMED_API_KEY=${PUBMED_API_KEY:-}
+      - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
+      - ELSEVIER_API_KEY=${ELSEVIER_API_KEY:-}
+      - SPRINGER_API_KEY=${SPRINGER_API_KEY:-}
+      - SPRINGER_OPENACCESS_API_KEY=${SPRINGER_OPENACCESS_API_KEY:-}
+      - WILEY_TDM_TOKEN=${WILEY_TDM_TOKEN:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Optional: Mount downloads directory
+    # volumes:
+    #   - ./downloads:/app/downloads
+
+# Optional: Use env_file for API keys
+# env_file:
+#   - .env

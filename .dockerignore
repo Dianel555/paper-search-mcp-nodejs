@@ -1,0 +1,40 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build output (will be built in container)
+dist
+
+# Development files
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Test files
+src/test
+*.test.ts
+*.spec.ts
+coverage
+.nyc_output
+
+# Documentation (not needed in container)
+*.md
+!README.md
+
+# Docker files (avoid infinite loops)
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Misc
+.DS_Store
+*.log
+downloads
