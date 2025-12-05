@@ -298,7 +298,7 @@ export class IACRSearcher extends PaperSource {
       const lines = pageText.split('\n').map(line => line.trim()).filter(line => line);
       
       let publicationInfo = '';
-      let historyEntries: string[] = [];
+      const historyEntries: string[] = [];
       let lastUpdated: Date | null = null;
       
       // 查找发表信息

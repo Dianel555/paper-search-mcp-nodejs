@@ -167,7 +167,7 @@ export class WebOfScienceSearcher extends PaperSource {
    */
   private buildSearchQuery(query: string, options: WoSSearchOptions): Record<string, any> {
     // 构建WOS查询字符串 - 支持多主题和复杂查询
-    let formattedQuery = this.buildWosQuery(query, options);
+    const formattedQuery = this.buildWosQuery(query, options);
 
     const params: Record<string, any> = {
       q: formattedQuery,
