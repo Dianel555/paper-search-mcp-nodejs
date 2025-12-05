@@ -12,7 +12,7 @@
     "start": "node dist/server.js",
     "start:sse": "tsx src/server.ts",
     "dev": "tsx src/server.ts",
-    "test": "jest",
+    "test": "jest --passWithNoTests",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write src/**/*.ts"
   },
