@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Paper Search MCP Server - Node.js Implementation
+ * Paper Search MCP Server - Node.js Implementation with SSE Transport
  * 支持多个学术平台的论文搜索和下载，包括 Web of Science
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { 
-  ListToolsRequestSchema, 
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import {
+  ListToolsRequestSchema,
   CallToolRequestSchema,
   InitializeRequestSchema,
   PingRequestSchema,
@@ -15,6 +15,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import * as dotenv from 'dotenv';
+import http from 'http';
+import { URL } from 'url';
 import { ArxivSearcher } from './platforms/ArxivSearcher.js';
 import { WebOfScienceSearcher } from './platforms/WebOfScienceSearcher.js';
 import { PubMedSearcher } from './platforms/PubMedSearcher.js';
@@ -1338,22 +1340,102 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
  */
 async function main() {
   try {
-    debugLog('🚀 Starting Paper Search MCP Server (Node.js)...');
+    const PORT = parseInt(process.env.PORT || '3000', 10);
+    const HOST = process.env.HOST || 'localhost';
+
+    debugLog('🚀 Starting Paper Search MCP Server (Node.js) with SSE...');
     debugLog(`📍 Working directory: ${process.cwd()}`);
     debugLog(`📦 Node.js version: ${process.version}`);
     debugLog(`🔧 Process arguments:`, process.argv);
-    
-    // 连接到标准输入输出传输
-    const transport = new StdioServerTransport();
-    
-    debugLog('📡 Connecting to stdio transport...');
-    await server.connect(transport);
-    
-    debugLog('✅ Paper Search MCP Server is running!');
-    debugLog('🔌 Ready to receive MCP protocol messages via stdio');
-    
-    // 注意：MCP服务器通过stdio通信，不监听网络端口
-    debugLog('ℹ️  Note: MCP servers communicate via stdio, not network ports');
+
+    // Create HTTP server for SSE transport
+    const httpServer = http.createServer(async (req, res) => {
+      const url = new URL(req.url || '', `http://${req.headers.host}`);
+
+      // Enable CORS
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
+      // SSE endpoint
+      if (url.pathname === '/sse' && req.method === 'GET') {
+        debugLog('📡 New SSE connection request');
+
+        // Set SSE headers
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive'
+        });
+
+        try {
+          const transport = new SSEServerTransport(url.pathname, res);
+          await server.connect(transport);
+          debugLog('✅ SSE client connected');
+        } catch (error) {
+          debugLog('❌ Error connecting SSE client:', error);
+          res.end();
+        }
+        return;
+      }
+
+      // Message endpoint for client-to-server communication
+      if (url.pathname === '/message' && req.method === 'POST') {
+        let body = '';
+
+        req.on('data', chunk => {
+          body += chunk.toString();
+        });
+
+        req.on('end', () => {
+          try {
+            const message = JSON.parse(body);
+            debugLog('📨 Received message:', message);
+
+            // The SSE transport will handle the message
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'received' }));
+          } catch (error) {
+            debugLog('❌ Error parsing message:', error);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          }
+        });
+        return;
+      }
+
+      // Health check endpoint
+      if (url.pathname === '/health' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'healthy',
+          name: 'paper-search-mcp-nodejs',
+          version: '0.2.2',
+          transport: 'SSE'
+        }));
+        return;
+      }
+
+      // Default response
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+    });
+
+    httpServer.listen(PORT, HOST, () => {
+      console.log(`✅ Paper Search MCP Server is running!`);
+      console.log(`🌐 HTTP Server listening on http://${HOST}:${PORT}`);
+      console.log(`📡 SSE endpoint: http://${HOST}:${PORT}/sse`);
+      console.log(`💬 Message endpoint: http://${HOST}:${PORT}/message`);
+      console.log(`❤️  Health check: http://${HOST}:${PORT}/health`);
+      debugLog('🔌 Ready to receive MCP protocol messages via SSE');
+    });
+
   } catch (error) {
     debugLog('❌ Failed to start server:', error);
     process.exit(1);

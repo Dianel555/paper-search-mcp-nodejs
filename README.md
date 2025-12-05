@@ -1,16 +1,18 @@
-# Paper Search MCP (Node.js)
+# Paper Search MCP (Node.js) with SSE Transport
 
 ## English|[中文](README-sc.md)
 
-A Node.js Model Context Protocol (MCP) server for searching and downloading academic papers from multiple sources, including arXiv, Web of Science, PubMed, Google Scholar, Sci-Hub, ScienceDirect, Springer, Wiley, Scopus, and **13 academic platforms** in total.
+A Node.js Model Context Protocol (MCP) server with **Server-Sent Events (SSE)** transport for searching and downloading academic papers from multiple sources, including arXiv, Web of Science, PubMed, Google Scholar, Sci-Hub, ScienceDirect, Springer, Wiley, Scopus, and **13 academic platforms** in total.
 
 ![Node.js](https://img.shields.io/badge/node.js->=18.0.0-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-13-brightgreen.svg)
+![Transport](https://img.shields.io/badge/transport-SSE-orange.svg)
 
 ## ✨ Key Features
 
+- **📡 SSE Transport**: Server-Sent Events for real-time communication over HTTP
 - **🌍 13 Academic Platforms**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus
 - **🔗 MCP Protocol Integration**: Seamless integration with Claude Desktop and other AI assistants
 - **📊 Unified Data Model**: Standardized paper format across all platforms
@@ -98,63 +100,67 @@ cp .env.example .env
 
 ### Build and Run
 
-#### Method 1: NPX (Recommended for MCP)
-```bash
-# Direct run with npx (most common MCP deployment)
-npx -y paper-search-mcp-nodejs
-
-# Or install globally
-npm install -g paper-search-mcp-nodejs
-paper-search-mcp
-```
-
-#### Method 2: Local Development
+#### Method 1: SSE Server (Recommended)
 ```bash
 # Build TypeScript code
 npm run build
 
-# Start server
+# Start SSE server (listens on http://localhost:3000)
 npm start
 
 # Or run in development mode
 npm run dev
+
+# Or with custom port and host
+PORT=8080 HOST=0.0.0.0 npm start
+```
+
+The server will start with the following endpoints:
+- **SSE endpoint**: `http://localhost:3000/sse` - For MCP protocol communication
+- **Message endpoint**: `http://localhost:3000/message` - For client-to-server messages
+- **Health check**: `http://localhost:3000/health` - Server health status
+
+#### Method 2: Environment Variables
+```bash
+# Configure port and host
+export PORT=3000          # Default: 3000
+export HOST=localhost     # Default: localhost
+
+# Start the server
+npm start
 ```
 
 ### MCP Server Configuration
 
-Add the following configuration to your Claude Desktop config file:
+#### SSE Transport Configuration
+For MCP clients that support SSE transport, use the following configuration:
 
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-#### NPX Configuration (Recommended)
 ```json
 {
   "mcpServers": {
-    "paper-search-nodejs": {
-      "command": "npx",
-      "args": ["-y", "paper-search-mcp-nodejs"],
+    "paper-search-nodejs-sse": {
+      "url": "http://localhost:3000/sse",
+      "transport": "sse",
       "env": {
-        "WOS_API_KEY": "your_web_of_science_api_key"
+        "WOS_API_KEY": "your_web_of_science_api_key",
+        "PUBMED_API_KEY": "your_ncbi_api_key_here",
+        "SEMANTIC_SCHOLAR_API_KEY": "your_semantic_scholar_api_key",
+        "ELSEVIER_API_KEY": "your_elsevier_api_key",
+        "SPRINGER_API_KEY": "your_springer_api_key",
+        "WILEY_TDM_TOKEN": "your_wiley_tdm_token"
       }
     }
   }
 }
 ```
 
-#### Local Installation Configuration
-```json
-{
-  "mcpServers": {
-    "paper_search_nodejs": {
-      "command": "node",
-      "args": ["/path/to/paper-search-mcp-nodejs/dist/server.js"],
-      "env": {
-        "WOS_API_KEY": "your_web_of_science_api_key"
-      }
-    }
-  }
-}
+#### Testing the SSE Connection
+```bash
+# Check server health
+curl http://localhost:3000/health
+
+# Connect to SSE endpoint (should keep connection open)
+curl -N http://localhost:3000/sse
 ```
 
 ## 🛠️ MCP Tools

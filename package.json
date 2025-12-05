@@ -1,16 +1,16 @@
 {
-  "name": "paper-search-mcp-nodejs",
-  "version": "0.2.2",
-  "description": "A Node.js MCP server for searching and downloading academic papers from multiple sources, including arXiv, PubMed, bioRxiv, Web of Science, and more.",
+  "name": "paper-search-mcp-nodejs-sse",
+  "version": "0.3.0",
+  "description": "A Node.js MCP server with SSE transport for searching and downloading academic papers from multiple sources, including arXiv, PubMed, bioRxiv, Web of Science, and more.",
   "main": "dist/server.js",
   "type": "module",
   "bin": {
-    "paper-search-mcp-nodejs": "./dist/server.js"
+    "paper-search-mcp-nodejs-sse": "./dist/server.js"
   },
   "scripts": {
     "build": "npx tsc",
     "start": "node dist/server.js",
-    "start:mcp": "tsx src/server.ts",
+    "start:sse": "tsx src/server.ts",
     "dev": "tsx src/server.ts",
     "test": "jest",
     "lint": "eslint src/**/*.ts",
