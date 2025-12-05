@@ -9,6 +9,8 @@ A Node.js Model Context Protocol (MCP) server with **Server-Sent Events (SSE)** 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-13-brightgreen.svg)
 ![Transport](https://img.shields.io/badge/transport-SSE-orange.svg)
+[![CI](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/ci.yml/badge.svg)](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/ci.yml)
+[![Docker](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/docker-publish.yml)
 
 ## ✨ Key Features
 
@@ -147,6 +149,18 @@ docker-compose logs -f
 
 # Stop
 docker-compose down
+```
+
+#### Method 4: Pre-built Docker Image (Easiest)
+```bash
+# Pull from GitHub Container Registry
+docker pull ghcr.io/jhleee/paper-search-mcp-nodejs-sse:latest
+
+# Run with environment variables
+docker run -d -p 3000:3000 \
+  -e WOS_API_KEY=your_key \
+  -e PUBMED_API_KEY=your_key \
+  ghcr.io/jhleee/paper-search-mcp-nodejs-sse:latest
 ```
 
 ### MCP Server Configuration

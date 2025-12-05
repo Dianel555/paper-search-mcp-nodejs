@@ -9,6 +9,8 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-13-brightgreen.svg)
 ![Transport](https://img.shields.io/badge/transport-SSE-orange.svg)
+[![CI](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/ci.yml/badge.svg)](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/ci.yml)
+[![Docker](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/jhleee/paper-search-mcp-nodejs-sse/actions/workflows/docker-publish.yml)
 
 ## ✨ 주요 기능
 
@@ -119,6 +121,18 @@ docker-compose logs -f
 
 # 중지
 docker-compose down
+```
+
+#### 방법 3: 사전 빌드된 Docker 이미지 (가장 쉬움)
+```bash
+# GitHub Container Registry에서 이미지 가져오기
+docker pull ghcr.io/jhleee/paper-search-mcp-nodejs-sse:latest
+
+# 환경변수와 함께 실행
+docker run -d -p 3000:3000 \
+  -e WOS_API_KEY=your_key \
+  -e PUBMED_API_KEY=your_key \
+  ghcr.io/jhleee/paper-search-mcp-nodejs-sse:latest
 ```
 
 ### 서버 엔드포인트
