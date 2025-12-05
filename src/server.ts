@@ -48,7 +48,7 @@ const debugLog = (...messages: any[]) => {
 // 创建MCP服务器实例
 const server = new Server({
   name: 'paper-search-mcp-nodejs',
-  version: '0.2.2'
+  version: '0.3.0'
 }, {
   capabilities: {
     tools: {
@@ -1348,6 +1348,9 @@ async function main() {
     debugLog(`📦 Node.js version: ${process.version}`);
     debugLog(`🔧 Process arguments:`, process.argv);
 
+    // Store active transports by sessionId
+    const transports = new Map<string, SSEServerTransport>();
+
     // Create HTTP server for SSE transport
     const httpServer = http.createServer(async (req, res) => {
       const url = new URL(req.url || '', `http://${req.headers.host}`);
@@ -1367,46 +1370,61 @@ async function main() {
       if (url.pathname === '/sse' && req.method === 'GET') {
         debugLog('📡 New SSE connection request');
 
-        // Set SSE headers
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive'
-        });
-
         try {
-          const transport = new SSEServerTransport(url.pathname, res);
+          // Create transport with /messages endpoint for POST requests
+          const transport = new SSEServerTransport('/messages', res);
+
+          // Store transport by sessionId for routing POST requests
+          transports.set(transport.sessionId, transport);
+          debugLog(`📝 Transport registered with sessionId: ${transport.sessionId}`);
+
+          // Clean up when connection closes
+          res.on('close', () => {
+            transports.delete(transport.sessionId);
+            debugLog(`🗑️ Transport removed: ${transport.sessionId}`);
+          });
+
+          // Connect server to transport (this calls start() internally)
           await server.connect(transport);
           debugLog('✅ SSE client connected');
         } catch (error) {
           debugLog('❌ Error connecting SSE client:', error);
+          if (!res.headersSent) {
+            res.writeHead(500);
+          }
           res.end();
         }
         return;
       }
 
       // Message endpoint for client-to-server communication
-      if (url.pathname === '/message' && req.method === 'POST') {
-        let body = '';
+      if (url.pathname === '/messages' && req.method === 'POST') {
+        const sessionId = url.searchParams.get('sessionId');
+        debugLog(`📨 Received POST message for sessionId: ${sessionId}`);
 
-        req.on('data', chunk => {
-          body += chunk.toString();
-        });
+        if (!sessionId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing sessionId parameter' }));
+          return;
+        }
 
-        req.on('end', () => {
-          try {
-            const message = JSON.parse(body);
-            debugLog('📨 Received message:', message);
+        const transport = transports.get(sessionId);
+        if (!transport) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Session not found' }));
+          return;
+        }
 
-            // The SSE transport will handle the message
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'received' }));
-          } catch (error) {
-            debugLog('❌ Error parsing message:', error);
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        try {
+          // Let the transport handle the POST message
+          await transport.handlePostMessage(req, res);
+        } catch (error: any) {
+          debugLog('❌ Error handling POST message:', error);
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: error.message }));
           }
-        });
+        }
         return;
       }
 
@@ -1416,8 +1434,9 @@ async function main() {
         res.end(JSON.stringify({
           status: 'healthy',
           name: 'paper-search-mcp-nodejs',
-          version: '0.2.2',
-          transport: 'SSE'
+          version: '0.3.0',
+          transport: 'SSE',
+          activeSessions: transports.size
         }));
         return;
       }
@@ -1431,7 +1450,7 @@ async function main() {
       console.log(`✅ Paper Search MCP Server is running!`);
       console.log(`🌐 HTTP Server listening on http://${HOST}:${PORT}`);
       console.log(`📡 SSE endpoint: http://${HOST}:${PORT}/sse`);
-      console.log(`💬 Message endpoint: http://${HOST}:${PORT}/message`);
+      console.log(`💬 Message endpoint: http://${HOST}:${PORT}/messages`);
       console.log(`❤️  Health check: http://${HOST}:${PORT}/health`);
       debugLog('🔌 Ready to receive MCP protocol messages via SSE');
     });
