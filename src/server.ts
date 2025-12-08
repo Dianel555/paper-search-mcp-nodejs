@@ -32,6 +32,7 @@ import { WileySearcher } from './platforms/WileySearcher.js';
 import { ScopusSearcher } from './platforms/ScopusSearcher.js';
 import { PaperFactory, Paper } from './models/Paper.js';
 import { PaperSource } from './platforms/PaperSource.js';
+import { logToolCall, logToolResponse, logAccess, logError, logInfo } from './utils/logger.js';
 
 // 加载环境变量
 dotenv.config();
@@ -718,7 +719,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // 添加tools/call请求处理器
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  const startTime = Date.now();
+  let success = true;
+  let errorMessage: string | undefined;
+
   debugLog(`🔨 Received tools/call request: ${name}`);
+  logToolCall(name, args);
 
   try {
     // 延迟初始化搜索器
@@ -1325,7 +1331,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error: any) {
+    success = false;
+    errorMessage = error.message;
     debugLog(`Error in tool ${name}:`, error);
+    logError(error, { tool: name, arguments: args });
     return {
       content: [{
         type: 'text',
@@ -1333,6 +1342,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }],
       isError: true
     };
+  } finally {
+    const duration = Date.now() - startTime;
+    logToolResponse(name, success, duration, errorMessage);
   }
 });
 
@@ -1361,6 +1373,10 @@ async function main() {
     // Create HTTP server
     const httpServer = http.createServer(async (req, res) => {
       const url = new URL(req.url || '', `http://${req.headers.host}`);
+      const sessionId = req.headers['x-session-id'] as string | undefined;
+
+      // Log access
+      logAccess(req.method || 'UNKNOWN', url.pathname, sessionId);
 
       // Enable CORS
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1376,6 +1392,7 @@ async function main() {
 
       // Health check endpoint
       if (url.pathname === '/health' && req.method === 'GET') {
+        logAccess(req.method, url.pathname, sessionId, 200);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'healthy',
@@ -1394,8 +1411,11 @@ async function main() {
         try {
           // Let the transport handle the request
           await transport.handleRequest(req, res);
+          logAccess(req.method || 'UNKNOWN', url.pathname, sessionId, res.statusCode);
         } catch (error: any) {
           debugLog('❌ Error handling MCP request:', error);
+          logError(error as Error, { method: req.method, path: url.pathname, sessionId });
+          logAccess(req.method || 'UNKNOWN', url.pathname, sessionId, 500);
           if (!res.headersSent) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: error.message }));
@@ -1405,17 +1425,21 @@ async function main() {
       }
 
       // Default response
+      logAccess(req.method || 'UNKNOWN', url.pathname, sessionId, 404);
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
     });
 
     httpServer.listen(PORT, HOST, () => {
+      const message = `Paper Search MCP Server is running on http://${HOST}:${PORT}`;
       console.log(`✅ Paper Search MCP Server is running!`);
       console.log(`🌐 HTTP Server listening on http://${HOST}:${PORT}`);
       console.log(`📡 MCP endpoint: http://${HOST}:${PORT}/mcp`);
       console.log(`📡 SSE endpoint: http://${HOST}:${PORT}/sse (legacy)`);
       console.log(`❤️  Health check: http://${HOST}:${PORT}/health`);
+      console.log(`📝 Logs directory: ./logs`);
       debugLog('🔌 Ready to receive MCP protocol messages via Streamable HTTP');
+      logInfo('Server started', { host: HOST, port: PORT });
     });
 
   } catch (error) {
