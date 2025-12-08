@@ -30,7 +30,7 @@
   "author": "dianel",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.6.0",
+    "@modelcontextprotocol/sdk": "^1.24.3",
     "@types/cheerio": "^0.22.35",
     "axios": "^1.7.2",
     "cheerio": "^1.1.2",
