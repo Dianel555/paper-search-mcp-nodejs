@@ -1407,6 +1407,17 @@ async function main() {
       // MCP endpoint - handle all MCP requests (GET/POST/DELETE)
       if (url.pathname === '/mcp' || url.pathname === '/sse') {
         debugLog(`📡 ${req.method} request to ${url.pathname}`);
+        debugLog(`📋 Headers:`, JSON.stringify(req.headers, null, 2));
+        debugLog(`📋 Query:`, url.search);
+
+        // Log detailed request information for debugging
+        logInfo('MCP request received', {
+          method: req.method,
+          pathname: url.pathname,
+          search: url.search,
+          headers: req.headers,
+          sessionId
+        });
 
         try {
           // Let the transport handle the request
