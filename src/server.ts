@@ -5,7 +5,7 @@
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -17,6 +17,7 @@ import { z } from 'zod';
 import * as dotenv from 'dotenv';
 import http from 'http';
 import { URL } from 'url';
+import { randomUUID } from 'crypto';
 import { ArxivSearcher } from './platforms/ArxivSearcher.js';
 import { WebOfScienceSearcher } from './platforms/WebOfScienceSearcher.js';
 import { PubMedSearcher } from './platforms/PubMedSearcher.js';
@@ -1343,88 +1344,33 @@ async function main() {
     const PORT = parseInt(process.env.PORT || '3000', 10);
     const HOST = process.env.HOST || 'localhost';
 
-    debugLog('🚀 Starting Paper Search MCP Server (Node.js) with SSE...');
+    debugLog('🚀 Starting Paper Search MCP Server (Node.js) with Streamable HTTP...');
     debugLog(`📍 Working directory: ${process.cwd()}`);
     debugLog(`📦 Node.js version: ${process.version}`);
     debugLog(`🔧 Process arguments:`, process.argv);
 
-    // Store active transports by sessionId
-    const transports = new Map<string, SSEServerTransport>();
+    // Create a single transport instance for the server
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID()
+    });
 
-    // Create HTTP server for SSE transport
+    // Connect the server to the transport
+    await server.connect(transport);
+    debugLog('✅ MCP Server connected to transport');
+
+    // Create HTTP server
     const httpServer = http.createServer(async (req, res) => {
       const url = new URL(req.url || '', `http://${req.headers.host}`);
 
       // Enable CORS
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Session-Id');
+      res.setHeader('Access-Control-Expose-Headers', 'X-Session-Id');
 
       if (req.method === 'OPTIONS') {
         res.writeHead(200);
         res.end();
-        return;
-      }
-
-      // SSE endpoint
-      if (url.pathname === '/sse' && req.method === 'GET') {
-        debugLog('📡 New SSE connection request');
-
-        try {
-          // Create transport with /messages endpoint for POST requests
-          const transport = new SSEServerTransport('/messages', res);
-
-          // Store transport by sessionId for routing POST requests
-          transports.set(transport.sessionId, transport);
-          debugLog(`📝 Transport registered with sessionId: ${transport.sessionId}`);
-
-          // Clean up when connection closes
-          res.on('close', () => {
-            transports.delete(transport.sessionId);
-            debugLog(`🗑️ Transport removed: ${transport.sessionId}`);
-          });
-
-          // Connect server to transport (this calls start() internally)
-          await server.connect(transport);
-          debugLog('✅ SSE client connected');
-        } catch (error) {
-          debugLog('❌ Error connecting SSE client:', error);
-          if (!res.headersSent) {
-            res.writeHead(500);
-          }
-          res.end();
-        }
-        return;
-      }
-
-      // Message endpoint for client-to-server communication
-      if (url.pathname === '/messages' && req.method === 'POST') {
-        const sessionId = url.searchParams.get('sessionId');
-        debugLog(`📨 Received POST message for sessionId: ${sessionId}`);
-
-        if (!sessionId) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Missing sessionId parameter' }));
-          return;
-        }
-
-        const transport = transports.get(sessionId);
-        if (!transport) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Session not found' }));
-          return;
-        }
-
-        try {
-          // Let the transport handle the POST message
-          await transport.handlePostMessage(req, res);
-        } catch (error: any) {
-          debugLog('❌ Error handling POST message:', error);
-          if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: error.message }));
-          }
-        }
         return;
       }
 
@@ -1435,9 +1381,26 @@ async function main() {
           status: 'healthy',
           name: 'paper-search-mcp-nodejs',
           version: '0.3.0',
-          transport: 'SSE',
-          activeSessions: transports.size
+          transport: 'StreamableHTTP',
+          sessionId: transport.sessionId
         }));
+        return;
+      }
+
+      // MCP endpoint - handle all MCP requests (GET/POST/DELETE)
+      if (url.pathname === '/mcp' || url.pathname === '/sse') {
+        debugLog(`📡 ${req.method} request to ${url.pathname}`);
+
+        try {
+          // Let the transport handle the request
+          await transport.handleRequest(req, res);
+        } catch (error: any) {
+          debugLog('❌ Error handling MCP request:', error);
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: error.message }));
+          }
+        }
         return;
       }
 
@@ -1449,10 +1412,10 @@ async function main() {
     httpServer.listen(PORT, HOST, () => {
       console.log(`✅ Paper Search MCP Server is running!`);
       console.log(`🌐 HTTP Server listening on http://${HOST}:${PORT}`);
-      console.log(`📡 SSE endpoint: http://${HOST}:${PORT}/sse`);
-      console.log(`💬 Message endpoint: http://${HOST}:${PORT}/messages`);
+      console.log(`📡 MCP endpoint: http://${HOST}:${PORT}/mcp`);
+      console.log(`📡 SSE endpoint: http://${HOST}:${PORT}/sse (legacy)`);
       console.log(`❤️  Health check: http://${HOST}:${PORT}/health`);
-      debugLog('🔌 Ready to receive MCP protocol messages via SSE');
+      debugLog('🔌 Ready to receive MCP protocol messages via Streamable HTTP');
     });
 
   } catch (error) {
