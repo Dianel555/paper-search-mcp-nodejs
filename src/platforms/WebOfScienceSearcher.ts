@@ -79,16 +79,52 @@ interface WoSRecord {
 }
 
 export class WebOfScienceSearcher extends PaperSource {
-  private readonly apiUrl: string;
-  private readonly apiVersion: string;
+  private apiUrl: string;
+  private apiVersion: string;
+  private fallbackAttempted: boolean = false;
+  private readonly preferredVersion: string;
 
-  constructor(apiKey?: string, apiVersion: string = 'v1') {
+  constructor(apiKey?: string, apiVersion?: string) {
     super('webofscience', 'https://api.clarivate.com/apis', apiKey);
-    this.apiVersion = apiVersion;
+    // Priority: constructor param > env var > default 'v2'
+    this.preferredVersion = apiVersion || process.env.WOS_API_VERSION || 'v2';
+    this.apiVersion = this.preferredVersion;
     this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
-    // 只在开发模式下输出调试信息
+    
     if (process.env.NODE_ENV === 'development') {
-      console.error(`🔧 WoS API URL: ${this.apiUrl}`);
+      console.error(`🔧 WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
+    }
+  }
+
+  /**
+   * Switch to fallback API version (v2 -> v1 or v1 -> v2)
+   */
+  private switchToFallbackVersion(): boolean {
+    if (this.fallbackAttempted) {
+      return false; // Already tried fallback
+    }
+    
+    const fallbackVersion = this.apiVersion === 'v2' ? 'v1' : 'v2';
+    console.error(`⚠️ WoS API ${this.apiVersion} failed, switching to ${fallbackVersion}`);
+    
+    this.apiVersion = fallbackVersion;
+    this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
+    this.fallbackAttempted = true;
+    
+    return true;
+  }
+
+  /**
+   * Reset fallback state (call after successful request)
+   * This allows the next request to try the preferred version first
+   */
+  private resetFallbackState(): void {
+    // Always reset on success, so next request can try preferred version
+    if (this.fallbackAttempted && this.apiVersion !== this.preferredVersion) {
+      // We're on fallback version, schedule return to preferred on next request
+      this.fallbackAttempted = false;
+      this.apiVersion = this.preferredVersion;
+      this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
     }
   }
 
@@ -500,9 +536,9 @@ export class WebOfScienceSearcher extends PaperSource {
   }
 
   /**
-   * 发起API请求
+   * 发起API请求 - 支持自动版本降级
    */
-  private async makeApiRequest(endpoint: string, config: any): Promise<AxiosResponse> {
+  private async makeApiRequest(endpoint: string, config: any, isRetry: boolean = false): Promise<AxiosResponse> {
     const url = `${this.apiUrl}${endpoint}`;
     
     const requestConfig = {
@@ -518,7 +554,7 @@ export class WebOfScienceSearcher extends PaperSource {
 
     // 调试日志 - 只在开发模式或详细日志模式下输出
     if (process.env.NODE_ENV === 'development' || process.env.WOS_VERBOSE_LOGGING === 'true') {
-      console.error(`🔍 WoS API Request: ${config.method} ${url}`);
+      console.error(`🔍 WoS API Request: ${config.method} ${url} (version: ${this.apiVersion})`);
       console.error(`📋 WoS Request params:`, config.params);
     }
     
@@ -528,10 +564,15 @@ export class WebOfScienceSearcher extends PaperSource {
         console.error(`✅ WoS API Response: ${response.status} ${response.statusText}`);
         console.error(`📄 WoS Response data preview:`, JSON.stringify(response.data, null, 2).substring(0, 500));
       }
+      // Reset fallback state on success
+      this.resetFallbackState();
       return response;
     } catch (error: any) {
-      console.error(`❌ WoS API Error:`, {
-        status: error.response?.status,
+      const status = error.response?.status;
+      
+      // Log error details
+      console.error(`❌ WoS API Error (${this.apiVersion}):`, {
+        status,
         statusText: error.response?.statusText,
         data: error.response?.data,
         config: {
@@ -540,6 +581,20 @@ export class WebOfScienceSearcher extends PaperSource {
           params: error.config?.params
         }
       });
+
+      // Try fallback version for connection/server errors (not auth errors)
+      // 404, 500, 502, 503, 504, or network errors trigger fallback
+      const shouldFallback = !isRetry && (
+        !status || // Network error
+        status === 404 || // Not found (version mismatch)
+        status >= 500 // Server errors
+      );
+
+      if (shouldFallback && this.switchToFallbackVersion()) {
+        console.error(`🔄 Retrying with WoS API ${this.apiVersion}...`);
+        return this.makeApiRequest(endpoint, config, true);
+      }
+
       throw error;
     }
   }

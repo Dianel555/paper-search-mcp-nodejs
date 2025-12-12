@@ -41,6 +41,28 @@ export class CrossrefSearcher extends PaperSource {
     };
   }
 
+  /**
+   * Clean and validate DOI format
+   * @param doi Raw DOI string (may include URL prefixes)
+   * @returns Cleaned DOI or null if invalid
+   */
+  private cleanAndValidateDoi(doi: string): string | null {
+    if (!doi) return null;
+    
+    const cleanDoi = doi
+      .replace('https://doi.org/', '')
+      .replace('http://dx.doi.org/', '')
+      .replace('doi:', '')
+      .trim();
+
+    // DOIs must start with '10.'
+    if (!cleanDoi || !cleanDoi.startsWith('10.')) {
+      return null;
+    }
+
+    return cleanDoi;
+  }
+
   async search(query: string, options: SearchOptions = {}): Promise<Paper[]> {
     const maxResults = Math.min(options.maxResults || 10, 1000);
     
@@ -97,16 +119,9 @@ export class CrossrefSearcher extends PaperSource {
   }
 
   async getPaperByDoi(doi: string): Promise<Paper | null> {
-    // Clean DOI format
-    const cleanDoi = doi
-      .replace('https://doi.org/', '')
-      .replace('http://dx.doi.org/', '')
-      .replace('doi:', '')
-      .trim();
-
-    // Validate DOI format
-    if (!cleanDoi || !cleanDoi.startsWith('10.')) {
-      console.error('Invalid DOI format:', cleanDoi);
+    const cleanDoi = this.cleanAndValidateDoi(doi);
+    if (!cleanDoi) {
+      console.error('Invalid DOI format:', doi);
       return null;
     }
 
@@ -140,15 +155,9 @@ export class CrossrefSearcher extends PaperSource {
     // Crossref API doesn't directly provide citations
     // Use OpenCitations COCI API as supplement
     
-    // Clean and validate DOI
-    const cleanDoi = doi
-      .replace('https://doi.org/', '')
-      .replace('http://dx.doi.org/', '')
-      .replace('doi:', '')
-      .trim();
-
-    if (!cleanDoi || !cleanDoi.startsWith('10.')) {
-      console.error('Invalid DOI format for citations:', cleanDoi);
+    const cleanDoi = this.cleanAndValidateDoi(doi);
+    if (!cleanDoi) {
+      console.error('Invalid DOI format for citations:', doi);
       return [];
     }
 

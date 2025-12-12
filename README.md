@@ -8,7 +8,7 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)
 
 ## ✨ Key Features
 
@@ -16,9 +16,10 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 - **🔗 MCP Protocol Integration**: Seamless integration with Claude Desktop and other AI assistants
 - **📊 Unified Data Model**: Standardized paper format across all platforms
 - **⚡ High-Performance Search**: Concurrent search with intelligent rate limiting
-- **🛡️ Type Safety**: Complete TypeScript support
+- **🛡️ Security First**: DOI validation, query sanitization, injection prevention, sensitive data masking
+- **📝 Type Safety**: Complete TypeScript support with extended interfaces
 - **🎯 Academic Papers First**: Smart filtering prioritizing academic papers over books
-- **🔄 Smart Error Handling**: Platform fallback and auto-retry mechanisms
+- **🔄 Smart Error Handling**: Unified ErrorHandler with retry logic and platform fallback
 
 ## 📚 Supported Platforms
 
@@ -448,6 +449,33 @@ src/
 3. Register new searcher in `server.ts`
 4. Add corresponding MCP tool
 
+### Security Features (v0.2.4)
+
+The codebase includes comprehensive security utilities:
+
+```
+src/utils/
+├── SecurityUtils.ts      # Security utilities
+│   ├── sanitizeDoi()     # DOI format validation
+│   ├── escapeQueryValue() # Query injection prevention
+│   ├── validateQueryComplexity() # DoS prevention
+│   ├── withTimeout()     # Request timeout protection
+│   ├── sanitizeRequest() # Sensitive data removal
+│   └── maskSensitiveData() # API key masking
+├── ErrorHandler.ts       # Unified error handling
+│   ├── ApiError class    # Custom error with metadata
+│   ├── HTTP error codes  # 400-504 handling
+│   └── Retry logic       # Exponential backoff
+└── RateLimiter.ts        # Token bucket rate limiting
+```
+
+**Security Best Practices:**
+- All DOIs are validated before use in URLs
+- Query parameters are escaped to prevent injection
+- API keys are masked in all log output
+- Request timeouts prevent hanging connections
+- Query complexity limits prevent DoS attacks
+
 ### Testing
 
 ```bash
@@ -460,6 +488,18 @@ npm run lint
 # Code formatting
 npm run format
 ```
+
+**Test Coverage:**
+- 15 test suites, 144 test cases
+- All 13 platform searchers tested
+- Security utilities (DOI validation, query sanitization)
+- ErrorHandler (error classification, retry logic)
+
+| Test Suite | Coverage |
+|------------|----------|
+| Platform Searchers | 13/13 ✅ |
+| SecurityUtils | ✅ |
+| ErrorHandler | ✅ |
 
 ## 🌟 Platform-Specific Features
 
@@ -495,10 +535,17 @@ search_springer({
 
 ### Web of Science Advanced Search
 
-🎯 **Recently Fixed (v0.2.2)**: Multi-topic search, date sorting, and year range filtering now work correctly!
+🎯 **WoS Starter API v1/v2 Support**: Uses Clarivate's WoS Starter API with full field tag support.
+
+**API Version Configuration:**
+```bash
+# In .env file (default: v1)
+WOS_API_VERSION=v1   # Stable, recommended
+# WOS_API_VERSION=v2  # Newer version, same endpoints
+```
 
 ```typescript
-// Multi-topic search (FIXED in v0.2.2)
+// Multi-topic search
 search_webofscience({
   query: 'oriented structure',
   year: '2023-2025',
@@ -507,10 +554,10 @@ search_webofscience({
   maxResults: 10
 })
 
-// Year range filtering (NEW in v0.2.2)
+// Year range filtering
 search_webofscience({
   query: 'machine learning',
-  year: '2020-2024',  // Now supports range format
+  year: '2020-2024',  // Supports range format
   sortBy: 'citations',
   sortOrder: 'desc'
 })
@@ -525,20 +572,19 @@ search_webofscience({
   sortOrder: 'desc'
 })
 
-// Traditional WOS query syntax still supported
+// Traditional WOS query syntax with field tags
 search_webofscience({
-  query: 'TS="machine learning" AND PY=2023',
+  query: 'TS="machine learning" AND PY=2023 AND DT="Article"',
   maxResults: 20
 })
 ```
 
-**🔧 v0.2.2 Improvements:**
+**🔧 v0.2.4 Improvements:**
 
-- ✅ **Multi-topic Search**: Complex keywords like "oriented structure" now work correctly
-- ✅ **Date Sorting**: Fixed API parameter mapping for proper date sorting
-- ✅ **Sort Order**: Added support for ascending/descending sort order
-- ✅ **Year Ranges**: Support for year ranges like "2020-2023"
-- ✅ **Query Escaping**: Proper handling of special characters in search terms
+- ✅ **18 Field Tags**: Full support for all WoS Starter API field tags
+- ✅ **API Version Selection**: Support for both v1 and v2 endpoints
+- ✅ **Enhanced Filtering**: ISSN, Volume, Page, Issue, DocType, PMID filters
+- ✅ **Query Validation**: Security checks for query complexity and injection prevention
 
 **Supported Search Options:**
 - `query`: Search terms (supports multi-topic)
@@ -547,21 +593,40 @@ search_webofscience({
 - `journal`: Journal/source filtering
 - `sortBy`: Sort field (`date`, `citations`, `relevance`, `title`, `author`, `journal`)
 - `sortOrder`: Sort direction (`asc`, `desc`)
-- `maxResults`: Maximum results (1-100)
+- `maxResults`: Maximum results (1-50 per page)
 
-**Supported WOS Fields:**
-- `TS`: Topic search
-- `AU`: Author
-- `SO`: Source journal
-- `PY`: Publication year
-- `DO`: DOI
-- `TI`: Title
+**Supported WOS Field Tags (18 total):**
+| Tag | Description | Tag | Description |
+|-----|-------------|-----|-------------|
+| `TS` | Topic (title, abstract, keywords) | `TI` | Title |
+| `AU` | Author | `AI` | Author Identifier |
+| `SO` | Source/Journal | `IS` | ISSN/ISBN |
+| `PY` | Publication Year | `FPY` | Final Publication Year |
+| `DO` | DOI | `DOP` | Date of Publication |
+| `VL` | Volume | `PG` | Page |
+| `CS` | Issue | `DT` | Document Type |
+| `PMID` | PubMed ID | `UT` | Accession Number |
+| `OG` | Organization | `SUR` | Source URL |
+
+**Example with Field Tags:**
+```typescript
+// Search by PMID
+search_webofscience({ query: 'PMID=12345678' })
+
+// Search by DOI
+search_webofscience({ query: 'DO="10.1038/nature12373"' })
+
+// Filter by document type
+search_webofscience({ query: 'TS="CRISPR" AND DT="Review"' })
+
+// Search specific volume/issue
+search_webofscience({ query: 'SO="Nature" AND VL=580 AND CS=7805' })
+```
 
 **🔧 Debugging WOS Issues:**
 ```bash
 # Enable verbose WOS API logging
 export WOS_VERBOSE_LOGGING=true
-# Or set in .env file: WOS_VERBOSE_LOGGING=true
 
 # Enable development mode for additional debug info
 export NODE_ENV=development

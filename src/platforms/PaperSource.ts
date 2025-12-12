@@ -5,6 +5,7 @@
 
 import { Paper } from '../models/Paper.js';
 import { sanitizeRequest, maskSensitiveData } from '../utils/SecurityUtils.js';
+import { ErrorHandler, ApiError } from '../utils/ErrorHandler.js';
 
 export interface SearchOptions {
   /** 最大结果数量 */
@@ -70,11 +71,13 @@ export abstract class PaperSource {
   protected readonly baseUrl: string;
   protected readonly apiKey?: string;
   protected readonly platformName: string;
+  protected readonly errorHandler: ErrorHandler;
 
   constructor(platformName: string, baseUrl: string, apiKey?: string) {
     this.platformName = platformName;
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
+    this.errorHandler = new ErrorHandler(platformName, process.env.NODE_ENV === 'development');
   }
 
   /**
@@ -165,34 +168,25 @@ export abstract class PaperSource {
   }
 
   /**
-   * 通用的HTTP请求错误处理
+   * 通用的HTTP请求错误处理 - 使用统一ErrorHandler
    */
   protected handleHttpError(error: any, operation: string): never {
-    const message = error.response?.data?.message || error.message || 'Unknown error';
-    const status = error.response?.status;
-    const url = error.config?.url;
-    const method = error.config?.method?.toUpperCase();
+    // Delegate to ErrorHandler for unified error handling
+    this.errorHandler.handleHttpError(error, operation);
+  }
 
-    // Sanitize the entire request configuration (using imported functions)
-    const sanitizedConfig = sanitizeRequest(error.config);
+  /**
+   * 检查错误是否可重试
+   */
+  protected isRetryableError(error: any): boolean {
+    return ErrorHandler.isRetryable(error);
+  }
 
-    // Mask sensitive parts of the URL
-    const sanitizedUrl = url ? maskSensitiveData(url) : url;
-
-    // 详细错误信息用于调试（已清理敏感信息）
-    console.error(`❌ ${this.platformName} ${operation} Error Details:`, {
-      status,
-      message: maskSensitiveData(message),
-      url: sanitizedUrl,
-      method,
-      responseData: error.response?.data,
-      requestConfig: sanitizedConfig,
-      timestamp: new Date().toISOString()
-    });
-
-    throw new Error(
-      `${this.platformName} ${operation} failed${status ? ` (${status})` : ''}: ${message}. URL: ${method} ${sanitizedUrl}`
-    );
+  /**
+   * 获取建议的重试延迟
+   */
+  protected getRetryDelay(error: any, attempt: number = 1): number {
+    return ErrorHandler.getRetryDelay(error, attempt);
   }
 
   /**

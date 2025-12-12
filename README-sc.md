@@ -7,7 +7,7 @@
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)
 
 ## ✨ 核心特性
 
@@ -15,9 +15,10 @@
 - **🔗 MCP协议集成**: 与Claude Desktop和其他AI助手无缝集成
 - **📊 统一数据模型**: 标准化的论文数据格式，支持所有平台
 - **⚡ 高性能搜索**: 并发搜索和智能速率限制
-- **🛡️ 类型安全**: 完整的TypeScript支持
+- **🛡️ 安全优先**: DOI验证、查询清理、注入防护、敏感数据脱敏
+- **📝 类型安全**: 完整的TypeScript支持和扩展接口
 - **🎯 学术论文优先**: 智能过滤，优先显示学术论文而非书籍
-- **🔄 智能错误处理**: 平台降级和自动重试机制
+- **🔄 智能错误处理**: 统一ErrorHandler，支持重试逻辑和平台降级
 
 ## 📚 支持的平台
 
@@ -478,6 +479,18 @@ npm run lint
 npm run format
 ```
 
+**测试覆盖:**
+- 15个测试套件，144个测试用例
+- 所有13个平台搜索器已测试
+- 安全工具（DOI验证、查询清理）
+- 错误处理器（错误分类、重试逻辑）
+
+| 测试套件 | 覆盖状态 |
+|----------|----------|
+| 平台搜索器 | 13/13 ✅ |
+| SecurityUtils | ✅ |
+| ErrorHandler | ✅ |
+
 ## 🌟 平台特性
 
 ### Springer Nature 双API系统
@@ -497,17 +510,19 @@ Springer Nature提供两个API：
 
 ### Web of Science 特性
 
-🎯 **最新修复 (v0.2.2)**: 多主题搜索、日期排序和年份范围过滤现已正常工作！
+🎯 **WoS Starter API v1/v2 支持**: 使用Clarivate的WoS Starter API，完整支持所有字段标签。
 
-### 支持的API
-
-- **Web of Science Starter API**: 基础搜索和被引统计
-- **Web of Science Researcher API**: 高级搜索和详细元数据
+**API版本配置:**
+```bash
+# 在.env文件中配置 (默认: v1)
+WOS_API_VERSION=v1   # 稳定版，推荐使用
+# WOS_API_VERSION=v2  # 较新版本，相同端点
+```
 
 ### 高级搜索语法
 
 ```typescript
-// 多主题搜索 (v0.2.2已修复)
+// 多主题搜索
 search_webofscience({
   query: 'oriented structure',
   year: '2023-2025',
@@ -516,10 +531,10 @@ search_webofscience({
   maxResults: 10
 })
 
-// 年份范围过滤 (v0.2.2新功能)
+// 年份范围过滤
 search_webofscience({
   query: 'machine learning',
-  year: '2020-2024',  // 现在支持范围格式
+  year: '2020-2024',  // 支持范围格式
   sortBy: 'citations',
   sortOrder: 'desc'
 })
@@ -534,19 +549,18 @@ search_webofscience({
   sortOrder: 'desc'
 })
 
-// 传统WOS查询语法仍支持
+// 带字段标签的传统WOS查询语法
 search_webofscience({
-  query: 'TS="machine learning" AND PY=2023',
+  query: 'TS="machine learning" AND PY=2023 AND DT="Article"',
   maxResults: 20
 })
 ```
 
-**🔧 v0.2.2 改进:**
-- ✅ **多主题搜索**: "oriented structure"等复杂关键词现在能正确工作
-- ✅ **日期排序**: 修复了API参数映射，实现正确的日期排序
-- ✅ **排序顺序**: 新增对升序/降序排序的支持
-- ✅ **年份范围**: 支持"2020-2023"等年份范围搜索
-- ✅ **查询转义**: 正确处理搜索词中的特殊字符
+**🔧 v0.2.4 改进:**
+- ✅ **18个字段标签**: 完整支持所有WoS Starter API字段标签
+- ✅ **API版本选择**: 支持v1和v2端点
+- ✅ **增强过滤**: ISSN、卷号、页码、期号、文档类型、PMID过滤器
+- ✅ **查询验证**: 查询复杂度和注入防护的安全检查
 
 **支持的搜索选项:**
 - `query`: 搜索词 (支持多主题)
@@ -555,21 +569,40 @@ search_webofscience({
 - `journal`: 期刊/来源过滤
 - `sortBy`: 排序字段 (`date`, `citations`, `relevance`, `title`, `author`, `journal`)
 - `sortOrder`: 排序方向 (`asc`, `desc`)
-- `maxResults`: 最大结果数 (1-100)
+- `maxResults`: 最大结果数 (每页1-50)
 
-**支持的WOS字段:**
-- `TS`: 主题搜索
-- `AU`: 作者
-- `SO`: 来源期刊
-- `PY`: 发表年份
-- `DO`: DOI
-- `TI`: 标题
+**支持的WOS字段标签 (共18个):**
+| 标签 | 描述 | 标签 | 描述 |
+|------|------|------|------|
+| `TS` | 主题 (标题、摘要、关键词) | `TI` | 标题 |
+| `AU` | 作者 | `AI` | 作者标识符 |
+| `SO` | 来源/期刊 | `IS` | ISSN/ISBN |
+| `PY` | 发表年份 | `FPY` | 最终发表年份 |
+| `DO` | DOI | `DOP` | 发表日期 |
+| `VL` | 卷号 | `PG` | 页码 |
+| `CS` | 期号 | `DT` | 文档类型 |
+| `PMID` | PubMed ID | `UT` | 入藏号 |
+| `OG` | 机构 | `SUR` | 来源URL |
+
+**字段标签示例:**
+```typescript
+// 通过PMID搜索
+search_webofscience({ query: 'PMID=12345678' })
+
+// 通过DOI搜索
+search_webofscience({ query: 'DO="10.1038/nature12373"' })
+
+// 按文档类型过滤
+search_webofscience({ query: 'TS="CRISPR" AND DT="Review"' })
+
+// 搜索特定卷/期
+search_webofscience({ query: 'SO="Nature" AND VL=580 AND CS=7805' })
+```
 
 **🔧 调试WOS问题:**
 ```bash
 # 启用详细的WOS API日志
 export WOS_VERBOSE_LOGGING=true
-# 或在.env文件中设置: WOS_VERBOSE_LOGGING=true
 
 # 启用开发模式获取额外调试信息
 export NODE_ENV=development

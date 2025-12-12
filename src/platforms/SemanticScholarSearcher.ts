@@ -9,6 +9,7 @@ import * as path from 'path';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { sanitizeDoi } from '../utils/SecurityUtils.js';
 
 interface SemanticSearchOptions extends SearchOptions {
   /** 发表年份范围 */
@@ -302,8 +303,15 @@ export class SemanticScholarSearcher extends PaperSource {
    * 根据DOI获取论文信息
    */
   async getPaperByDoi(doi: string): Promise<Paper | null> {
+    // Clean and validate DOI
+    const doiResult = sanitizeDoi(doi);
+    if (!doiResult.valid) {
+      console.error('Invalid DOI format:', doi, doiResult.error);
+      return null;
+    }
+
     try {
-      return await this.getPaperDetails(`DOI:${doi}`);
+      return await this.getPaperDetails(`DOI:${doiResult.sanitized}`);
     } catch (error) {
       console.error('Error getting paper by DOI from Semantic Scholar:', error);
       return null;

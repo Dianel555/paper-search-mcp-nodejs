@@ -1,6 +1,6 @@
 {
   "name": "paper-search-mcp-nodejs",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A Node.js MCP server for searching and downloading academic papers from multiple sources, including arXiv, PubMed, bioRxiv, Web of Science, and more.",
   "main": "dist/server.js",
   "type": "module",
@@ -12,7 +12,7 @@
     "start": "node dist/server.js",
     "start:mcp": "tsx src/server.ts",
     "dev": "tsx src/server.ts",
-    "test": "jest",
+    "test": "jest --forceExit",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write src/**/*.ts"
   },
@@ -48,8 +48,26 @@
     "eslint": "^8.57.0",
     "jest": "^29.7.0",
     "prettier": "^3.3.2",
+    "ts-jest": "^29.2.5",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3"
+  },
+  "jest": {
+    "preset": "ts-jest/presets/default-esm",
+    "testEnvironment": "node",
+    "extensionsToTreatAsEsm": [".ts"],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "transform": {
+      "^.+\\.tsx?$": ["ts-jest", { "useESM": true }]
+    },
+    "testMatch": ["**/tests/**/*.test.ts"],
+    "setupFilesAfterEnv": ["<rootDir>/tests/setup.ts"],
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.d.ts"
+    ]
   },
   "overrides": {
     "entities": "^6.0.0"

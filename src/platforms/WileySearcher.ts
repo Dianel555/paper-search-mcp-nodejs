@@ -20,6 +20,7 @@ import axios, { AxiosInstance } from 'axios';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { sanitizeDoi } from '../utils/SecurityUtils.js';
 
 export class WileySearcher extends PaperSource {
   private client: AxiosInstance;
@@ -67,10 +68,12 @@ export class WileySearcher extends PaperSource {
       throw new Error('Wiley TDM token is required. Set WILEY_TDM_TOKEN environment variable.');
     }
 
-    // Validate DOI format
-    if (!doi || !doi.includes('/')) {
-      throw new Error(`Invalid DOI format: ${doi}`);
+    // Clean and validate DOI format
+    const doiResult = sanitizeDoi(doi);
+    if (!doiResult.valid) {
+      throw new Error(`Invalid DOI format: ${doi}. ${doiResult.error || ''}`);
     }
+    const cleanDoi = doiResult.sanitized;
 
     const fs = await import('fs');
     const path = await import('path');
@@ -81,7 +84,7 @@ export class WileySearcher extends PaperSource {
     }
 
     // Encode DOI for URL (replace / with %2F)
-    const encodedDoi = encodeURIComponent(doi);
+    const encodedDoi = encodeURIComponent(cleanDoi);
     const url = `/articles/${encodedDoi}`;
 
     await this.rateLimiter.waitForPermission();
@@ -96,7 +99,7 @@ export class WileySearcher extends PaperSource {
       });
 
       // Generate filename from DOI
-      const fileName = `${doi.replace(/[\/\\:*?"<>|]/g, '_')}.pdf`;
+      const fileName = `${cleanDoi.replace(/[\/\\:*?"<>|]/g, '_')}.pdf`;
       const filePath = path.join(savePath, fileName);
 
       const writer = fs.createWriteStream(filePath);
@@ -126,16 +129,20 @@ export class WileySearcher extends PaperSource {
    * Get article metadata and download link (without downloading)
    */
   async getArticleInfo(doi: string): Promise<Paper> {
+    // Clean and validate DOI
+    const doiResult = sanitizeDoi(doi);
+    const cleanDoi = doiResult.valid ? doiResult.sanitized : doi;
+
     // Since TDM API only provides PDF download, we create basic paper info from DOI
     return PaperFactory.create({
-      paperId: doi,
-      title: `Wiley Article: ${doi}`,
+      paperId: cleanDoi,
+      title: `Wiley Article: ${cleanDoi}`,
       authors: [],
       abstract: '',
-      doi: doi,
+      doi: cleanDoi,
       publishedDate: null,
-      pdfUrl: `https://api.wiley.com/onlinelibrary/tdm/v1/articles/${encodeURIComponent(doi)}`,
-      url: `https://doi.org/${doi}`,
+      pdfUrl: `https://api.wiley.com/onlinelibrary/tdm/v1/articles/${encodeURIComponent(cleanDoi)}`,
+      url: `https://doi.org/${cleanDoi}`,
       source: 'Wiley',
       extra: {
         note: 'Use Crossref API for full metadata. This endpoint only provides PDF download.'
