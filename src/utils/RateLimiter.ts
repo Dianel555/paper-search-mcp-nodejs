@@ -3,6 +3,8 @@
  * 用于控制API请求频率，遵守各平台的使用限制
  */
 
+import { logDebug } from './Logger.js';
+
 export interface RateLimiterOptions {
   /** 每秒最大请求数 */
   requestsPerSecond: number;
@@ -20,6 +22,7 @@ export class RateLimiter {
   
   private tokens: number;
   private lastRefill: number;
+  private intervalHandle: NodeJS.Timeout;
   private readonly pendingRequests: Array<{
     resolve: () => void;
     timestamp: number;
@@ -35,7 +38,9 @@ export class RateLimiter {
     this.lastRefill = Date.now();
     
     // 定期处理等待中的请求
-    setInterval(() => this.processPendingRequests(), Math.min(this.intervalMs, 100));
+    this.intervalHandle = setInterval(() => this.processPendingRequests(), Math.min(this.intervalMs, 100));
+    // Don't keep the process alive just because of the limiter interval (important for tests/MCP)
+    this.intervalHandle.unref?.();
   }
 
   /**
@@ -47,7 +52,7 @@ export class RateLimiter {
     if (this.tokens > 0) {
       this.tokens--;
       if (this.debug) {
-        console.log(`RateLimiter: Request allowed, ${this.tokens} tokens remaining`);
+        logDebug(`RateLimiter: Request allowed, ${this.tokens} tokens remaining`);
       }
       return Promise.resolve();
     }
@@ -60,7 +65,7 @@ export class RateLimiter {
       });
       
       if (this.debug) {
-        console.log(`RateLimiter: Request queued, ${this.pendingRequests.length} waiting`);
+        logDebug(`RateLimiter: Request queued, ${this.pendingRequests.length} waiting`);
       }
     });
   }
@@ -78,7 +83,7 @@ export class RateLimiter {
       this.lastRefill = now;
       
       if (this.debug && tokensToAdd > 0) {
-        console.log(`RateLimiter: Added ${tokensToAdd} tokens, total: ${this.tokens}`);
+        logDebug(`RateLimiter: Added ${tokensToAdd} tokens, total: ${this.tokens}`);
       }
     }
   }
@@ -97,7 +102,7 @@ export class RateLimiter {
         
         if (this.debug) {
           const waitTime = Date.now() - request.timestamp;
-          console.log(`RateLimiter: Released waiting request (waited ${waitTime}ms), ${this.tokens} tokens remaining`);
+          logDebug(`RateLimiter: Released waiting request (waited ${waitTime}ms), ${this.tokens} tokens remaining`);
         }
       }
     }
@@ -142,7 +147,11 @@ export class RateLimiter {
     }
     
     if (this.debug && removedCount > 0) {
-      console.log(`RateLimiter: Cleaned up ${removedCount} expired requests`);
+      logDebug(`RateLimiter: Cleaned up ${removedCount} expired requests`);
     }
+  }
+
+  dispose(): void {
+    clearInterval(this.intervalHandle);
   }
 }

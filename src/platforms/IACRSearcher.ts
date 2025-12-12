@@ -9,6 +9,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
+import { TIMEOUTS } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 interface IACRSearchOptions extends SearchOptions {
   /** 是否获取详细信息 */
@@ -49,12 +51,12 @@ export class IACRSearcher extends PaperSource {
         q: query
       };
 
-      console.error(`🔍 IACR API Request: GET ${this.searchUrl}`);
-      console.error(`📋 IACR Request params:`, params);
+      logDebug(`IACR API Request: GET ${this.searchUrl}`);
+      logDebug('IACR Request params:', params);
 
       const response = await axios.get(this.searchUrl, {
         params,
-        timeout: 30000,
+        timeout: TIMEOUTS.DEFAULT,
         headers: {
           'User-Agent': this.getRandomUserAgent(),
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -62,14 +64,14 @@ export class IACRSearcher extends PaperSource {
         }
       });
       
-      console.error(`✅ IACR API Response: ${response.status} ${response.statusText}`);
+      logDebug(`IACR API Response: ${response.status} ${response.statusText}`);
       
       const papers = await this.parseSearchResponse(response.data, options);
-      console.error(`📄 IACR Parsed ${papers.length} papers`);
+      logDebug(`IACR Parsed ${papers.length} papers`);
       
       return papers.slice(0, options.maxResults || 10);
     } catch (error: any) {
-      console.error(`❌ IACR Search Error:`, error.message);
+      logDebug('IACR Search Error:', error.message);
       this.handleHttpError(error, 'search');
     }
   }
@@ -82,7 +84,7 @@ export class IACRSearcher extends PaperSource {
       const paperUrl = paperId.startsWith('http') ? paperId : `${this.baseUrl}/${paperId}`;
       
       const response = await axios.get(paperUrl, {
-        timeout: 30000,
+        timeout: TIMEOUTS.DEFAULT,
         headers: {
           'User-Agent': this.getRandomUserAgent(),
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -91,13 +93,13 @@ export class IACRSearcher extends PaperSource {
       });
 
       if (response.status !== 200) {
-        console.error(`Failed to fetch paper details: HTTP ${response.status}`);
+        logDebug(`Failed to fetch paper details: HTTP ${response.status}`);
         return null;
       }
 
       return this.parseIACRPaperDetails(response.data, paperId);
     } catch (error: any) {
-      console.error(`Error fetching paper details for ${paperId}:`, error.message);
+      logDebug(`Error fetching paper details for ${paperId}:`, error.message);
       return null;
     }
   }
@@ -125,7 +127,7 @@ export class IACRSearcher extends PaperSource {
 
       const response = await axios.get(pdfUrl, {
         responseType: 'stream',
-        timeout: 60000,
+        timeout: TIMEOUTS.EXTENDED,
         headers: {
           'User-Agent': this.getRandomUserAgent()
         }
@@ -237,13 +239,13 @@ export class IACRSearcher extends PaperSource {
         
         papers.push(paper);
       } catch (error) {
-        console.error('Error parsing IACR search result:', error);
+        logDebug('Error parsing IACR search result:', error);
       }
     });
     
     // 如果需要详细信息，获取每篇论文的详细信息
     if (options.fetchDetails && papers.length > 0) {
-      console.error('Fetching detailed information for IACR papers...');
+      logDebug('Fetching detailed information for IACR papers...');
       const detailedPapers: Paper[] = [];
       
       for (const paper of papers) {
@@ -258,7 +260,7 @@ export class IACRSearcher extends PaperSource {
           // 添加延迟避免过快请求
           await this.delay(1000);
         } catch (error) {
-          console.error(`Error fetching details for ${paper.paperId}:`, error);
+          logDebug(`Error fetching details for ${paper.paperId}:`, error);
           detailedPapers.push(paper);
         }
       }
@@ -357,7 +359,7 @@ export class IACRSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing IACR paper details:', error);
+      logDebug('Error parsing IACR paper details:', error);
       return null;
     }
   }

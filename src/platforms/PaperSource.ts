@@ -6,6 +6,7 @@
 import { Paper } from '../models/Paper.js';
 import { sanitizeRequest, maskSensitiveData } from '../utils/SecurityUtils.js';
 import { ErrorHandler, ApiError } from '../utils/ErrorHandler.js';
+import { logDebug } from '../utils/Logger.js';
 
 export interface SearchOptions {
   /** 最大结果数量 */
@@ -119,7 +120,7 @@ export abstract class PaperSource {
       const results = await this.search(doi, { maxResults: 1 });
       return results.length > 0 ? results[0] : null;
     } catch (error) {
-      console.error(`Error getting paper by DOI from ${this.platformName}:`, error);
+      logDebug(`Error getting paper by DOI from ${this.platformName}:`, error);
       return null;
     }
   }

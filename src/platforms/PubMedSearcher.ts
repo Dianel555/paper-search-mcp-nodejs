@@ -8,6 +8,8 @@ import * as xml2js from 'xml2js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 interface PubMedSearchOptions extends SearchOptions {
   /** 搜索字段 */
@@ -157,7 +159,7 @@ export class PubMedSearcher extends PaperSource {
    */
   async search(query: string, options: PubMedSearchOptions = {}): Promise<Paper[]> {
     try {
-      console.error(`🔍 PubMed Search Starting: query="${query}", options=`, options);
+      logDebug(`PubMed Search Starting: query="${query}"`, options);
       
       // 第一步：使用ESearch获取PMID列表
       const pmids = await this.searchPMIDs(query, options);
@@ -176,8 +178,7 @@ export class PubMedSearcher extends PaperSource {
 
       return papers;
     } catch (error: any) {
-      console.error(`❌ PubMed Search Error:`, error.message);
-      console.error(`📍 PubMed Error Details:`, error.response?.data || error);
+      logDebug('PubMed Search Error:', error.message);
       this.handleHttpError(error, 'search');
     }
   }
@@ -204,13 +205,19 @@ export class PubMedSearcher extends PaperSource {
 
     const url = `${this.baseApiUrl}/esearch.fcgi`;
     
-    console.error(`🔍 PubMed ESearch Request: GET ${url}`);
-    console.error(`📋 PubMed ESearch params:`, params);
+    logDebug(`PubMed ESearch Request: GET ${url}`);
+    logDebug('PubMed ESearch params:', params);
     
-    const response = await axios.get(url, { params, timeout: 15000 });
+    const response = await axios.get(url, {
+      params,
+      timeout: TIMEOUTS.DEFAULT,
+      headers: {
+        'User-Agent': USER_AGENT
+      }
+    });
     
-    console.error(`✅ PubMed ESearch Response: ${response.status} ${response.statusText}`);
-    console.error(`📄 PubMed ESearch Response data:`, response.data.substring(0, 500));
+    logDebug(`PubMed ESearch Response: ${response.status} ${response.statusText}`);
+    logDebug('PubMed ESearch Response data:', response.data.substring(0, 500));
     
     const result: ESearchResponse = await this.parseXmlResponse(response.data);
     let pmids = result.eSearchResult.IdList?.Id || [];
@@ -220,7 +227,7 @@ export class PubMedSearcher extends PaperSource {
       pmids = [pmids];
     }
     
-    console.error(`🎯 PubMed Found ${pmids.length} PMIDs:`, pmids.slice(0, 5));
+    logDebug(`PubMed Found ${pmids.length} PMIDs:`, pmids.slice(0, 5));
     
     return pmids;
   }
@@ -243,7 +250,13 @@ export class PubMedSearcher extends PaperSource {
     }
 
     const url = `${this.baseApiUrl}/efetch.fcgi`;
-    const response = await axios.get(url, { params, timeout: 30000 });
+    const response = await axios.get(url, {
+      params,
+      timeout: TIMEOUTS.DEFAULT,
+      headers: {
+        'User-Agent': USER_AGENT
+      }
+    });
     
     const result: EFetchResponse = await this.parseXmlResponse(response.data);
     
@@ -323,9 +336,9 @@ export class PubMedSearcher extends PaperSource {
       trim: true
     });
     
-    console.error(`🔍 PubMed XML Parsing - Data preview:`, xmlData.substring(0, 200));
+    logDebug('PubMed XML Parsing - Data preview:', xmlData.substring(0, 200));
     const result = await parser.parseStringPromise(xmlData);
-    console.error(`📄 PubMed XML Parsed result structure:`, JSON.stringify(result, null, 2).substring(0, 1000));
+    logDebug('PubMed XML Parsed result structure:', JSON.stringify(result, null, 2).substring(0, 1000));
     
     return result;
   }
@@ -399,7 +412,7 @@ export class PubMedSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing PubMed article:', error);
+      logDebug('Error parsing PubMed article:', error);
       return null;
     }
   }
@@ -545,7 +558,7 @@ export class PubMedSearcher extends PaperSource {
       const papers = await this.fetchPaperDetails([pmid]);
       return papers.length > 0 ? papers[0] : null;
     } catch (error) {
-      console.error('Error getting paper by PMID:', error);
+      logDebug('Error getting paper by PMID:', error);
       return null;
     }
   }
@@ -558,7 +571,7 @@ export class PubMedSearcher extends PaperSource {
       const results = await this.search(`"${doi}"[DOI]`, { maxResults: 1 });
       return results.length > 0 ? results[0] : null;
     } catch (error) {
-      console.error('Error getting paper by DOI from PubMed:', error);
+      logDebug('Error getting paper by DOI from PubMed:', error);
       return null;
     }
   }

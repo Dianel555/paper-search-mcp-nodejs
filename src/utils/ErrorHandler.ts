@@ -4,6 +4,7 @@
  */
 
 import { sanitizeRequest, maskSensitiveData } from './SecurityUtils.js';
+import { logError as loggerError } from './Logger.js';
 
 /**
  * API Error codes and their meanings
@@ -219,7 +220,7 @@ export class ErrorHandler {
    * Log error with consistent format
    */
   private logError(details: Record<string, any>): void {
-    console.error(`❌ [${this.platform}] Error:`, {
+    loggerError(`[${this.platform}] Error:`, {
       timestamp: new Date().toISOString(),
       ...details
     });

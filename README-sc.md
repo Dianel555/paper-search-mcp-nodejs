@@ -7,7 +7,7 @@
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)
 
 ## ✨ 核心特性
 
@@ -42,6 +42,13 @@
 ✅ 已支持 | ❌ 不支持 | 🟡 可选 | ✅* 仅开放获取
 
 > **注意**: Wiley TDM API不支持关键词搜索。请使用`search_crossref`搜索Wiley文章获取DOI，然后使用`download_paper`配合`platform="wiley"`通过DOI下载PDF。
+
+## ⚖️ 合规与伦理使用（Sci-Hub / Google Scholar）
+
+本项目包含的部分集成可能涉及**法律、第三方服务条款（ToS）与伦理**风险。你需要自行确保使用方式符合当地法律、机构政策以及第三方平台条款。
+
+- **Sci-Hub**：在许多司法辖区可能涉及未经授权获取受版权保护内容。请仅在你拥有合法访问权的情况下使用（例如开放获取、作者公开版本或机构合法订阅）。
+- **Google Scholar**：该集成依赖自动化抓取/解析，可能违反 Google 的服务条款，且可能触发封禁/限流。若需要严格 ToS 合规，建议优先使用官方 API 或元数据平台（如 Crossref、Semantic Scholar）。
 
 ## 🚀 快速开始
 
@@ -556,7 +563,7 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.2.4 改进:**
+**🔧 v0.2.5 改进:**
 - ✅ **18个字段标签**: 完整支持所有WoS Starter API字段标签
 - ✅ **API版本选择**: 支持v1和v2端点
 - ✅ **增强过滤**: ISSN、卷号、页码、期号、文档类型、PMID过滤器
@@ -601,11 +608,10 @@ search_webofscience({ query: 'SO="Nature" AND VL=580 AND CS=7805' })
 
 **🔧 调试WOS问题:**
 ```bash
-# 启用详细的WOS API日志
-export WOS_VERBOSE_LOGGING=true
-
-# 启用开发模式获取额外调试信息
+# 启用调试日志
 export NODE_ENV=development
+
+# 在CI环境中，当 CI=true 时，会自动启用 logDebug 输出
 ```
 
 ## 🔑 API密钥需求

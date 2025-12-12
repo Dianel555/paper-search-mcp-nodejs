@@ -2,7 +2,7 @@
  * SciHubSearcher Platform Tests
  */
 
-import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
+import { describe, it, expect, beforeAll } from '@jest/globals';
 import { SciHubSearcher } from '../../src/platforms/SciHubSearcher.js';
 
 describe('SciHubSearcher', () => {
@@ -12,11 +12,6 @@ describe('SciHubSearcher', () => {
   beforeAll(() => {
     searcher = new SciHubSearcher();
   });
-
-  // Wait for async mirror health checks to complete (5s timeout + buffer)
-  afterAll(async () => {
-    await new Promise(resolve => setTimeout(resolve, 6000));
-  }, 10000);
 
   describe('getCapabilities', () => {
     it('should return correct capabilities', () => {

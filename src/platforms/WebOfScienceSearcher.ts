@@ -7,6 +7,8 @@ import axios, { AxiosResponse } from 'axios';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { escapeQueryValue, validateQueryComplexity, withTimeout } from '../utils/SecurityUtils.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
+import { logDebug, logWarn } from '../utils/Logger.js';
 
 interface WoSSearchOptions extends SearchOptions {
   /** 数据库选择 */
@@ -91,9 +93,7 @@ export class WebOfScienceSearcher extends PaperSource {
     this.apiVersion = this.preferredVersion;
     this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
     
-    if (process.env.NODE_ENV === 'development') {
-      console.error(`🔧 WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
-    }
+    logDebug(`WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
   }
 
   /**
@@ -105,7 +105,7 @@ export class WebOfScienceSearcher extends PaperSource {
     }
     
     const fallbackVersion = this.apiVersion === 'v2' ? 'v1' : 'v2';
-    console.error(`⚠️ WoS API ${this.apiVersion} failed, switching to ${fallbackVersion}`);
+    logWarn(`WoS API ${this.apiVersion} failed, switching to ${fallbackVersion}`);
     
     this.apiVersion = fallbackVersion;
     this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
@@ -157,7 +157,7 @@ export class WebOfScienceSearcher extends PaperSource {
       const hits = response.data?.hits || [];
       return hits.map((hit: any) => hit.uid).filter(Boolean);
     } catch (error) {
-      console.error(`Error getting reference IDs for UT ${uid}:`, error);
+      logDebug(`Error getting reference IDs for UT ${uid}:`, error);
       return [];
     }
   }
@@ -180,7 +180,7 @@ export class WebOfScienceSearcher extends PaperSource {
       const hits = response.data?.hits || [];
       return hits.map((hit: any) => hit.uid).filter(Boolean);
     } catch (error) {
-      console.error(`Error getting citation IDs for UT ${uid}:`, error);
+      logDebug(`Error getting citation IDs for UT ${uid}:`, error);
       return [];
     }
   }
@@ -213,7 +213,7 @@ export class WebOfScienceSearcher extends PaperSource {
       
       return paper;
     } catch (error) {
-      console.error('Error getting paper with citations:', error);
+      logDebug('Error getting paper with citations:', error);
       return null;
     }
   }
@@ -262,7 +262,7 @@ export class WebOfScienceSearcher extends PaperSource {
       const results = await this.search(query, { maxResults: 1 });
       return results.length > 0 ? results[0] : null;
     } catch (error) {
-      console.error('Error getting paper by DOI from Web of Science:', error);
+      logDebug('Error getting paper by DOI from Web of Science:', error);
       return null;
     }
   }
@@ -285,7 +285,7 @@ export class WebOfScienceSearcher extends PaperSource {
       
       return citationData ? parseInt(citationData.local_count, 10) : 0;
     } catch (error) {
-      console.error('Error getting citation count:', error);
+      logDebug('Error getting citation count:', error);
       return 0;
     }
   }
@@ -448,12 +448,12 @@ export class WebOfScienceSearcher extends PaperSource {
    */
   private parseSearchResponse(data: WoSApiResponse): Paper[] {
     if (!data.hits || !Array.isArray(data.hits)) {
-      console.error('❌ WoS: No hits found in response or hits is not an array');
+      logDebug('WoS: No hits found in response or hits is not an array');
       return [];
     }
 
-    if (process.env.NODE_ENV === 'development' || process.env.WOS_VERBOSE_LOGGING === 'true') {
-      console.error(`📊 WoS: Found ${data.hits.length} hits out of ${data.metadata?.total || 0} total`);
+    if (process.env.NODE_ENV === 'development') {
+      logDebug(`WoS: Found ${data.hits.length} hits out of ${data.metadata?.total || 0} total`);
     }
     return data.hits.map(record => this.parseWoSRecord(record))
       .filter(paper => paper !== null) as Paper[];
@@ -511,8 +511,8 @@ export class WebOfScienceSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing WoS record:', error);
-      console.error('Record data:', record);
+      logDebug('Error parsing WoS record:', error);
+      logDebug('Record data:', record);
       return null;
     }
   }
@@ -546,23 +546,23 @@ export class WebOfScienceSearcher extends PaperSource {
       headers: {
         'X-ApiKey': this.apiKey,
         'Content-Type': 'application/json',
-        'User-Agent': 'Paper-Search-MCP/1.0 (Academic Research Tool)',
+        'User-Agent': USER_AGENT,
         ...config.headers
       },
-      timeout: 30000
+      timeout: TIMEOUTS.DEFAULT
     };
 
-    // 调试日志 - 只在开发模式或详细日志模式下输出
-    if (process.env.NODE_ENV === 'development' || process.env.WOS_VERBOSE_LOGGING === 'true') {
-      console.error(`🔍 WoS API Request: ${config.method} ${url} (version: ${this.apiVersion})`);
-      console.error(`📋 WoS Request params:`, config.params);
+    // Debug logs only in development to avoid noisy stderr in CI/production
+    if (process.env.NODE_ENV === 'development') {
+      logDebug(`WoS API Request: ${config.method} ${url} (version: ${this.apiVersion})`);
+      logDebug('WoS Request params:', config.params);
     }
     
     try {
       const response = await axios(url, requestConfig);
-      if (process.env.NODE_ENV === 'development' || process.env.WOS_VERBOSE_LOGGING === 'true') {
-        console.error(`✅ WoS API Response: ${response.status} ${response.statusText}`);
-        console.error(`📄 WoS Response data preview:`, JSON.stringify(response.data, null, 2).substring(0, 500));
+      if (process.env.NODE_ENV === 'development') {
+        logDebug(`WoS API Response: ${response.status} ${response.statusText}`);
+        logDebug('WoS Response data preview:', JSON.stringify(response.data, null, 2).substring(0, 500));
       }
       // Reset fallback state on success
       this.resetFallbackState();
@@ -570,17 +570,18 @@ export class WebOfScienceSearcher extends PaperSource {
     } catch (error: any) {
       const status = error.response?.status;
       
-      // Log error details
-      console.error(`❌ WoS API Error (${this.apiVersion}):`, {
-        status,
-        statusText: error.response?.statusText,
-        data: error.response?.data,
-        config: {
-          url: error.config?.url,
-          method: error.config?.method,
-          params: error.config?.params
-        }
-      });
+      if (process.env.NODE_ENV === 'development') {
+        logDebug(`WoS API Error (${this.apiVersion}):`, {
+          status,
+          statusText: error.response?.statusText,
+          data: error.response?.data,
+          config: {
+            url: error.config?.url,
+            method: error.config?.method,
+            params: error.config?.params
+          }
+        });
+      }
 
       // Try fallback version for connection/server errors (not auth errors)
       // 404, 500, 502, 503, 504, or network errors trigger fallback
@@ -591,7 +592,7 @@ export class WebOfScienceSearcher extends PaperSource {
       );
 
       if (shouldFallback && this.switchToFallbackVersion()) {
-        console.error(`🔄 Retrying with WoS API ${this.apiVersion}...`);
+        logDebug(`Retrying with WoS API ${this.apiVersion}...`);
         return this.makeApiRequest(endpoint, config, true);
       }
 

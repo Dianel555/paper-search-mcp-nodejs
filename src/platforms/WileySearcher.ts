@@ -21,6 +21,7 @@ import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } fro
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
 import { sanitizeDoi } from '../utils/SecurityUtils.js';
+import { TIMEOUTS } from '../config/constants.js';
 
 export class WileySearcher extends PaperSource {
   private client: AxiosInstance;
@@ -36,7 +37,7 @@ export class WileySearcher extends PaperSource {
         ...(tdmToken ? { 'Wiley-TDM-Client-Token': tdmToken } : {})
       },
       maxRedirects: 5,
-      timeout: 60000
+      timeout: TIMEOUTS.EXTENDED
     });
 
     // Wiley rate limits: 3 articles/sec, 60 requests/10min
@@ -143,7 +144,7 @@ export class WileySearcher extends PaperSource {
       publishedDate: null,
       pdfUrl: `https://api.wiley.com/onlinelibrary/tdm/v1/articles/${encodeURIComponent(cleanDoi)}`,
       url: `https://doi.org/${cleanDoi}`,
-      source: 'Wiley',
+      source: 'wiley',
       extra: {
         note: 'Use Crossref API for full metadata. This endpoint only provides PDF download.'
       }

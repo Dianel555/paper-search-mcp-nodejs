@@ -14,6 +14,8 @@ import axios, { AxiosInstance } from 'axios';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { logDebug } from '../utils/Logger.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 
 interface ElsevierSearchResponse {
   'search-results': {
@@ -80,8 +82,10 @@ export class ScienceDirectSearcher extends PaperSource {
     
     this.client = axios.create({
       baseURL: 'https://api.elsevier.com',
+      timeout: TIMEOUTS.DEFAULT,
       headers: {
         'Accept': 'application/json',
+        'User-Agent': USER_AGENT,
         ...(apiKey ? { 'X-ELS-APIKey': apiKey } : {})
       }
     });
@@ -159,14 +163,7 @@ export class ScienceDirectSearcher extends PaperSource {
 
       return papers;
     } catch (error: any) {
-      console.error('ScienceDirect search error:', error.message);
-      if (error.response?.status === 401) {
-        throw new Error('Invalid or missing ScienceDirect API key');
-      }
-      if (error.response?.status === 429) {
-        throw new Error('ScienceDirect rate limit exceeded. Please try again later.');
-      }
-      throw error;
+      this.handleHttpError(error, 'search');
     }
   }
 
@@ -210,7 +207,7 @@ export class ScienceDirectSearcher extends PaperSource {
         doi: result.doi,
         publishedDate: publishedDate,
         url: result.uri,
-        source: 'ScienceDirect',
+        source: 'sciencedirect',
         journal: result.sourceTitle,
         year: year,
         extra: {
@@ -221,7 +218,7 @@ export class ScienceDirectSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing ScienceDirect result:', error);
+      logDebug('Error parsing ScienceDirect result:', error);
       return null;
     }
   }
@@ -279,7 +276,7 @@ export class ScienceDirectSearcher extends PaperSource {
         publishedDate: entry['prism:coverDate'] ? new Date(entry['prism:coverDate']) : null,
         pdfUrl: pdfUrl,
         url: paperUrl,
-        source: 'ScienceDirect',
+        source: 'sciencedirect',
         journal: entry['prism:publicationName'],
         volume: entry['prism:volume'],
         issue: entry['prism:issueIdentifier'],
@@ -290,7 +287,7 @@ export class ScienceDirectSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing ScienceDirect entry:', error);
+      logDebug('Error parsing ScienceDirect entry:', error);
       return null;
     }
   }
@@ -330,7 +327,7 @@ export class ScienceDirectSearcher extends PaperSource {
         doi: coredata['prism:doi'] || doi,
         publishedDate: coredata['prism:coverDate'] ? new Date(coredata['prism:coverDate']) : null,
         url: `https://doi.org/${doi}`,
-        source: 'ScienceDirect',
+        source: 'sciencedirect',
         journal: coredata['prism:publicationName'],
         volume: coredata['prism:volume'],
         issue: coredata['prism:issueIdentifier'],
@@ -338,7 +335,7 @@ export class ScienceDirectSearcher extends PaperSource {
         citationCount: coredata['citedby-count'] ? parseInt(coredata['citedby-count']) : undefined
       });
     } catch (error: any) {
-      console.error('ScienceDirect article details error:', error.message);
+      logDebug('ScienceDirect article details error:', error.message);
       return null;
     }
   }
@@ -374,7 +371,7 @@ export class ScienceDirectSearcher extends PaperSource {
       // Get paper to check DOI
       const paper = await this.getArticleDetails(paperId);
       if (!paper || !paper.doi) {
-        console.log(`ScienceDirect paper ${paperId} has no DOI, cannot fetch citations`);
+        logDebug(`ScienceDirect paper ${paperId} has no DOI, cannot fetch citations`);
         return [];
       }
 
@@ -382,7 +379,7 @@ export class ScienceDirectSearcher extends PaperSource {
       const crossref = new CrossrefSearcher();
       return await crossref.getCitations(paper.doi);
     } catch (error) {
-      console.error('Error getting ScienceDirect citations:', error);
+      logDebug('Error getting ScienceDirect citations:', error);
       return [];
     }
   }
@@ -395,7 +392,7 @@ export class ScienceDirectSearcher extends PaperSource {
       // Get paper to check DOI
       const paper = await this.getArticleDetails(paperId);
       if (!paper || !paper.doi) {
-        console.log(`ScienceDirect paper ${paperId} has no DOI, cannot fetch references`);
+        logDebug(`ScienceDirect paper ${paperId} has no DOI, cannot fetch references`);
         return [];
       }
 
@@ -403,7 +400,7 @@ export class ScienceDirectSearcher extends PaperSource {
       const crossref = new CrossrefSearcher();
       return await crossref.getReferences(paper.doi);
     } catch (error) {
-      console.error('Error getting ScienceDirect references:', error);
+      logDebug('Error getting ScienceDirect references:', error);
       return [];
     }
   }

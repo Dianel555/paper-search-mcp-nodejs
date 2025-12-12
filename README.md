@@ -8,7 +8,7 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)
 
 ## ✨ Key Features
 
@@ -43,6 +43,13 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ✅ Supported | ❌ Not supported | 🟡 Optional | ✅* Open Access only
 
 > **Note**: Wiley TDM API does not support keyword search. Use `search_crossref` to find Wiley articles, then use `download_paper` with `platform="wiley"` to download PDFs by DOI.
+
+## ⚖️ Compliance & Ethical Use (Sci-Hub / Google Scholar)
+
+This project includes integrations that may have **legal, contractual (ToS), and ethical** constraints. You are responsible for ensuring your usage complies with applicable laws, institutional policies, and third‑party terms.
+
+- **Sci-Hub**: May provide access to copyrighted works without authorization in many jurisdictions. Use only when you have the legal right to access the content (e.g., open access, author‑provided copies, or licensed institutional access).
+- **Google Scholar**: This integration relies on automated fetching/parsing and may violate Google's Terms of Service or trigger blocking/rate limits. Prefer official APIs or metadata sources (e.g., Crossref, Semantic Scholar) when ToS compliance is required.
 
 ## 🚀 Quick Start
 
@@ -449,7 +456,7 @@ src/
 3. Register new searcher in `server.ts`
 4. Add corresponding MCP tool
 
-### Security Features (v0.2.4)
+### Security Features (v0.2.5)
 
 The codebase includes comprehensive security utilities:
 
@@ -579,7 +586,7 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.2.4 Improvements:**
+**🔧 v0.2.5 Improvements:**
 
 - ✅ **18 Field Tags**: Full support for all WoS Starter API field tags
 - ✅ **API Version Selection**: Support for both v1 and v2 endpoints
@@ -625,11 +632,10 @@ search_webofscience({ query: 'SO="Nature" AND VL=580 AND CS=7805' })
 
 **🔧 Debugging WOS Issues:**
 ```bash
-# Enable verbose WOS API logging
-export WOS_VERBOSE_LOGGING=true
-
-# Enable development mode for additional debug info
+# Enable debug logging
 export NODE_ENV=development
+
+# In CI, logDebug is enabled automatically when CI=true
 ```
 
 ### Google Scholar Features

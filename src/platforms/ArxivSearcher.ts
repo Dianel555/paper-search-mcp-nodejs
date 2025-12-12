@@ -9,6 +9,8 @@ import * as path from 'path';
 import * as xml2js from 'xml2js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 interface ArxivEntry {
   id: string[];
@@ -75,25 +77,25 @@ export class ArxivSearcher extends PaperSource {
         sortOrder: sortOrderMap[options.sortOrder || 'desc'] || 'descending'
       };
 
-      console.error(`🔍 arXiv API Request: GET ${url}`);
-      console.error(`📋 arXiv Request params:`, params);
+      logDebug(`arXiv API Request: GET ${url}`);
+      logDebug('arXiv Request params:', params);
 
       const response = await axios.get(url, { 
         params, 
-        timeout: 30000,
+        timeout: TIMEOUTS.DEFAULT,
         headers: {
-          'User-Agent': 'Paper-Search-MCP/1.0 (Academic Research Tool)'
+          'User-Agent': USER_AGENT
         }
       });
       
-      console.error(`✅ arXiv API Response: ${response.status} ${response.statusText}, Data length: ${response.data?.length || 0}`);
+      logDebug(`arXiv API Response: ${response.status} ${response.statusText}, Data length: ${response.data?.length || 0}`);
       
       const papers = await this.parseSearchResponse(response.data);
-      console.error(`📄 arXiv Parsed ${papers.length} papers`);
+      logDebug(`arXiv Parsed ${papers.length} papers`);
       
       return papers;
     } catch (error: any) {
-      console.error(`❌ arXiv Search Error:`, error.message);
+      logDebug('arXiv Search Error:', error.message);
       this.handleHttpError(error, 'search');
     }
   }
@@ -121,7 +123,7 @@ export class ArxivSearcher extends PaperSource {
 
       const response = await axios.get(pdfUrl, {
         responseType: 'stream',
-        timeout: 60000
+        timeout: TIMEOUTS.DOWNLOAD
       });
 
       const writer = fs.createWriteStream(filePath);
@@ -222,7 +224,7 @@ export class ArxivSearcher extends PaperSource {
       return entries.map(entry => this.parseArxivEntry(entry))
         .filter(paper => paper !== null) as Paper[];
     } catch (error) {
-      console.error('Error parsing arXiv response:', error);
+      logDebug('Error parsing arXiv response:', error);
       return [];
     }
   }
@@ -287,7 +289,7 @@ export class ArxivSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing arXiv entry:', error);
+      logDebug('Error parsing arXiv entry:', error);
       return null;
     }
   }

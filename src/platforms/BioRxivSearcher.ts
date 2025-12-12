@@ -8,6 +8,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 interface BioRxivSearchOptions extends SearchOptions {
   /** 搜索天数范围 */
@@ -84,25 +86,25 @@ export class BioRxivSearcher extends PaperSource {
         params.category = category;
       }
 
-      console.error(`🔍 ${this.serverType} API Request: GET ${searchUrl}`);
-      console.error(`📋 ${this.serverType} Request params:`, params);
+      logDebug(`${this.serverType} API Request: GET ${searchUrl}`);
+      logDebug(`${this.serverType} Request params:`, params);
 
       const response = await axios.get(searchUrl, { 
         params,
-        timeout: 30000,
+        timeout: TIMEOUTS.DEFAULT,
         headers: {
-          'User-Agent': 'Paper-Search-MCP/1.0 (Academic Research Tool)'
+          'User-Agent': USER_AGENT
         }
       });
       
-      console.error(`✅ ${this.serverType} API Response: ${response.status} ${response.statusText}`);
+      logDebug(`${this.serverType} API Response: ${response.status} ${response.statusText}`);
       
       const papers = this.parseSearchResponse(response.data, query, options);
-      console.error(`📄 ${this.serverType} Parsed ${papers.length} papers`);
+      logDebug(`${this.serverType} Parsed ${papers.length} papers`);
       
       return papers.slice(0, options.maxResults || 10);
     } catch (error: any) {
-      console.error(`❌ ${this.serverType} Search Error:`, error.message);
+      logDebug(`${this.serverType} Search Error:`, error.message);
       this.handleHttpError(error, 'search');
     }
   }
@@ -132,7 +134,7 @@ export class BioRxivSearcher extends PaperSource {
 
       const response = await axios.get(pdfUrl, {
         responseType: 'stream',
-        timeout: 60000,
+        timeout: TIMEOUTS.DOWNLOAD,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
@@ -233,7 +235,7 @@ export class BioRxivSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error(`Error parsing ${this.serverType} paper:`, error);
+      logDebug(`Error parsing ${this.serverType} paper:`, error);
       return null;
     }
   }

@@ -9,6 +9,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
+import { logDebug, logWarn } from '../utils/Logger.js';
+import { TIMEOUTS } from '../config/constants.js';
 
 interface MirrorSite {
   url: string;
@@ -23,7 +25,7 @@ export class SciHubSearcher extends PaperSource {
   private currentMirrorIndex: number = 0;
   private axiosInstance: AxiosInstance;
   private readonly maxRetries: number = 3;
-  private readonly mirrorTestTimeout: number = 5000; // 5 seconds
+  private readonly mirrorTestTimeout: number = TIMEOUTS.HEALTH_CHECK;
   private lastHealthCheck: Date | null = null;
   private readonly healthCheckInterval: number = 300000; // 5 minutes
 
@@ -46,7 +48,7 @@ export class SciHubSearcher extends PaperSource {
     ];
 
     this.axiosInstance = axios.create({
-      timeout: 15000,
+      timeout: TIMEOUTS.DEFAULT,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -59,9 +61,6 @@ export class SciHubSearcher extends PaperSource {
       maxRedirects: 5,
       validateStatus: (status) => status < 500
     });
-
-    // 启动时进行健康检测
-    this.checkMirrorHealth();
   }
 
   getCapabilities(): PlatformCapabilities {
@@ -79,7 +78,7 @@ export class SciHubSearcher extends PaperSource {
    * 检测所有镜像站点的健康状态
    */
   private async checkMirrorHealth(): Promise<void> {
-    console.log('🔍 Checking Sci-Hub mirror sites health...');
+    logDebug('Checking Sci-Hub mirror sites health...');
     
     const healthPromises = this.mirrorSites.map(async (mirror, index) => {
       try {
@@ -107,9 +106,9 @@ export class SciHubSearcher extends PaperSource {
         };
         
         if (this.mirrorSites[index].isWorking) {
-          console.log(`✅ ${mirror.url} - OK (${responseTime}ms)`);
+          logDebug(`${mirror.url} - OK (${responseTime}ms)`);
         } else {
-          console.log(`⚠️ ${mirror.url} - Invalid response`);
+          logDebug(`${mirror.url} - Invalid response`);
         }
       } catch (error) {
         this.mirrorSites[index] = {
@@ -118,7 +117,7 @@ export class SciHubSearcher extends PaperSource {
           isWorking: false,
           failureCount: mirror.failureCount + 1
         };
-        console.log(`❌ ${mirror.url} - Failed`);
+        logDebug(`${mirror.url} - Failed`);
       }
     });
 
@@ -137,10 +136,10 @@ export class SciHubSearcher extends PaperSource {
     this.lastHealthCheck = new Date();
     
     const workingCount = this.mirrorSites.filter(m => m.isWorking).length;
-    console.log(`✅ Health check complete: ${workingCount}/${this.mirrorSites.length} mirrors working`);
+    logDebug(`Health check complete: ${workingCount}/${this.mirrorSites.length} mirrors working`);
     
     if (workingCount === 0) {
-      console.error('⚠️ Warning: No Sci-Hub mirrors are currently accessible!');
+      logWarn('Warning: No Sci-Hub mirrors are currently accessible!');
     }
   }
 
@@ -178,7 +177,7 @@ export class SciHubSearcher extends PaperSource {
       this.mirrorSites[mirrorIndex].failureCount++;
       if (this.mirrorSites[mirrorIndex].failureCount >= 3) {
         this.mirrorSites[mirrorIndex].isWorking = false;
-        console.log(`❌ Mirror ${mirrorUrl} marked as failed after multiple attempts`);
+        logDebug(`Mirror ${mirrorUrl} marked as failed after multiple attempts`);
       }
     }
 
@@ -203,7 +202,6 @@ export class SciHubSearcher extends PaperSource {
     // Sci-Hub 主要通过 DOI 或直接 URL 工作
     // 如果输入不是 DOI 或 URL，返回空结果
     if (!this.isValidDOIOrURL(query)) {
-      console.log('Sci-Hub requires a valid DOI or paper URL');
       return [];
     }
 
@@ -213,7 +211,7 @@ export class SciHubSearcher extends PaperSource {
         return [paperInfo];
       }
     } catch (error) {
-      console.error('Sci-Hub search error:', error);
+      logDebug('Sci-Hub search error:', error);
     }
     
     return [];
@@ -250,7 +248,7 @@ export class SciHubSearcher extends PaperSource {
     while (retries < this.maxRetries) {
       try {
         const searchUrl = `${currentMirror}/${cleanedQuery}`;
-        console.log(`🔍 Searching on ${currentMirror} for: ${cleanedQuery}`);
+        logDebug(`Searching on ${currentMirror} for: ${cleanedQuery}`);
         
         const response = await this.axiosInstance.get(searchUrl);
         
@@ -312,7 +310,7 @@ export class SciHubSearcher extends PaperSource {
             return PaperFactory.create({
               paperId: cleanedQuery,
               title: title || `Paper: ${cleanedQuery}`,
-              source: 'Sci-Hub',
+              source: 'scihub',
               authors: [],
               abstract: '',
               doi: this.isValidDOIOrURL(cleanedQuery) && cleanedQuery.includes('10.') 
@@ -327,17 +325,17 @@ export class SciHubSearcher extends PaperSource {
               }
             });
           } else {
-            console.log(`Paper not found on ${currentMirror}`);
+            logDebug(`Paper not found on ${currentMirror}`);
             currentMirror = await this.markMirrorFailed(currentMirror);
             retries++;
           }
         } else {
-          console.log(`Unexpected status ${response.status} from ${currentMirror}`);
+          logDebug(`Unexpected status ${response.status} from ${currentMirror}`);
           currentMirror = await this.markMirrorFailed(currentMirror);
           retries++;
         }
       } catch (error: any) {
-        console.error(`Error fetching from ${currentMirror}:`, error.message);
+        logDebug(`Error fetching from ${currentMirror}:`, error.message);
         currentMirror = await this.markMirrorFailed(currentMirror);
         retries++;
       }
@@ -368,7 +366,6 @@ export class SciHubSearcher extends PaperSource {
 
     // 检查文件是否已存在
     if (fs.existsSync(filePath) && !options?.overwrite) {
-      console.log(`File already exists: ${filePath}`);
       return filePath;
     }
 
@@ -378,11 +375,11 @@ export class SciHubSearcher extends PaperSource {
     
     while (retries < this.maxRetries) {
       try {
-        console.log(`📥 Downloading PDF from: ${currentPdfUrl}`);
+        logDebug(`Downloading PDF from: ${currentPdfUrl}`);
         
         const response = await this.axiosInstance.get(currentPdfUrl, {
           responseType: 'stream',
-          timeout: 60000 // 60 seconds for download
+          timeout: TIMEOUTS.DOWNLOAD
         });
 
         if (response.status === 200) {
@@ -391,7 +388,6 @@ export class SciHubSearcher extends PaperSource {
 
           return new Promise((resolve, reject) => {
             writer.on('finish', () => {
-              console.log(`✅ PDF downloaded successfully: ${filePath}`);
               resolve(filePath);
             });
             writer.on('error', reject);
@@ -400,7 +396,7 @@ export class SciHubSearcher extends PaperSource {
           throw new Error(`Failed to download PDF: status ${response.status}`);
         }
       } catch (error: any) {
-        console.error(`Download attempt ${retries + 1} failed:`, error.message);
+        logDebug(`Download attempt ${retries + 1} failed:`, error.message);
         retries++;
         
         if (retries < this.maxRetries) {
@@ -408,7 +404,7 @@ export class SciHubSearcher extends PaperSource {
           const updatedInfo = await this.fetchPaperInfo(paperId);
           if (updatedInfo?.pdfUrl && updatedInfo.pdfUrl !== currentPdfUrl) {
             currentPdfUrl = updatedInfo.pdfUrl;
-            console.log('Trying updated PDF URL...');
+            logDebug('Trying updated PDF URL...');
           } else {
             // 等待后重试
             await new Promise(resolve => setTimeout(resolve, 2000 * retries));

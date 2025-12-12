@@ -10,7 +10,9 @@
 import axios, { AxiosInstance } from 'axios';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
-import { withTimeout } from '../utils/SecurityUtils.js';
+import { sanitizeDoi, withTimeout } from '../utils/SecurityUtils.js';
+import { API_ENDPOINTS, DEFAULT_MAILTO, TIMEOUTS, USER_AGENT } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 export class CrossrefSearcher extends PaperSource {
   private client: AxiosInstance;
@@ -18,14 +20,14 @@ export class CrossrefSearcher extends PaperSource {
 
   constructor(mailto?: string) {
     super('crossref', 'https://api.crossref.org/works', undefined);
-    this.mailto = mailto || process.env.CROSSREF_MAILTO || 'paper-search-mcp@example.com';
+    this.mailto = mailto || process.env.CROSSREF_MAILTO || DEFAULT_MAILTO;
     
     this.client = axios.create({
       baseURL: this.baseUrl,
-      timeout: 30000,
+      timeout: TIMEOUTS.DEFAULT,
       headers: {
         'Accept': 'application/json',
-        'User-Agent': `paper-search-mcp-nodejs/0.2.2 (mailto:${this.mailto})`
+        'User-Agent': `${USER_AGENT} paper-search-mcp-nodejs/0.2.5 (mailto:${this.mailto})`
       }
     });
   }
@@ -47,20 +49,8 @@ export class CrossrefSearcher extends PaperSource {
    * @returns Cleaned DOI or null if invalid
    */
   private cleanAndValidateDoi(doi: string): string | null {
-    if (!doi) return null;
-    
-    const cleanDoi = doi
-      .replace('https://doi.org/', '')
-      .replace('http://dx.doi.org/', '')
-      .replace('doi:', '')
-      .trim();
-
-    // DOIs must start with '10.'
-    if (!cleanDoi || !cleanDoi.startsWith('10.')) {
-      return null;
-    }
-
-    return cleanDoi;
+    const result = sanitizeDoi(doi);
+    return result.valid ? result.sanitized : null;
   }
 
   async search(query: string, options: SearchOptions = {}): Promise<Paper[]> {
@@ -113,15 +103,13 @@ export class CrossrefSearcher extends PaperSource {
       
       return [];
     } catch (error: any) {
-      console.error('Crossref search error:', error.message);
-      return [];
+      this.handleHttpError(error, 'search');
     }
   }
 
   async getPaperByDoi(doi: string): Promise<Paper | null> {
     const cleanDoi = this.cleanAndValidateDoi(doi);
     if (!cleanDoi) {
-      console.error('Invalid DOI format:', doi);
       return null;
     }
 
@@ -146,7 +134,11 @@ export class CrossrefSearcher extends PaperSource {
       
       return null;
     } catch (error: any) {
-      console.error(`Crossref get paper error for DOI ${doi}:`, error.message);
+      // 404 means not found
+      if (error?.response?.status === 404) {
+        return null;
+      }
+      this.handleHttpError(error, 'getPaperByDoi');
       return null;
     }
   }
@@ -157,7 +149,6 @@ export class CrossrefSearcher extends PaperSource {
     
     const cleanDoi = this.cleanAndValidateDoi(doi);
     if (!cleanDoi) {
-      console.error('Invalid DOI format for citations:', doi);
       return [];
     }
 
@@ -168,10 +159,10 @@ export class CrossrefSearcher extends PaperSource {
       // Wrap with timeout for additional protection
       const response = await withTimeout(
         axios.get(
-          `https://opencitations.net/index/coci/api/v1/citations/${encodedDoi}`,
-          { timeout: 30000 }
+          `${API_ENDPOINTS.OPENCITATIONS}/citations/${encodedDoi}`,
+          { timeout: TIMEOUTS.DEFAULT }
         ),
-        35000, // Slightly longer than axios timeout
+        TIMEOUTS.DEFAULT + TIMEOUTS.BUFFER,
         'OpenCitations API request timed out'
       );
 
@@ -205,8 +196,7 @@ export class CrossrefSearcher extends PaperSource {
 
       return papers;
     } catch (error: any) {
-      console.error('Error getting citations from OpenCitations:', error.message);
-      return [];
+      this.handleHttpError(error, 'getCitations');
     }
   }
 
@@ -232,8 +222,7 @@ export class CrossrefSearcher extends PaperSource {
 
       return papers;
     } catch (error: any) {
-      console.error('Error getting Crossref references:', error.message);
-      return [];
+      this.handleHttpError(error, 'getReferences');
     }
   }
 
@@ -354,7 +343,7 @@ export class CrossrefSearcher extends PaperSource {
         }
       });
     } catch (error: any) {
-      console.error('Error parsing Crossref paper:', error.message);
+      logDebug('Error parsing Crossref paper:', error.message);
       return null;
     }
   }

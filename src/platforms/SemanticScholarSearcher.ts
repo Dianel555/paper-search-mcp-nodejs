@@ -10,6 +10,8 @@ import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
 import { sanitizeDoi } from '../utils/SecurityUtils.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 interface SemanticSearchOptions extends SearchOptions {
   /** 发表年份范围 */
@@ -128,7 +130,7 @@ export class SemanticScholarSearcher extends PaperSource {
 
       const url = `${this.baseApiUrl}/paper/search`;
       const headers: Record<string, string> = {
-        'User-Agent': 'Paper-Search-MCP/1.0 (Academic Research Tool)',
+        'User-Agent': USER_AGENT,
         'Accept': 'application/json',
         'Accept-Language': 'en-US,en;q=0.9'
       };
@@ -138,53 +140,44 @@ export class SemanticScholarSearcher extends PaperSource {
         headers['x-api-key'] = this.apiKey;
       }
 
-      console.error(`🔍 Semantic Scholar API Request: GET ${url}`);
-      console.error(`📋 Semantic Scholar Request params:`, params);
+      logDebug(`Semantic Scholar API Request: GET ${url}`);
+      logDebug('Semantic Scholar Request params:', params);
 
       const response = await axios.get(url, { 
         params, 
         headers,
-        timeout: 30000,
+        timeout: TIMEOUTS.DEFAULT,
         // 改善请求可靠性
         maxRedirects: 5,
-        validateStatus: (status) => status < 500, // 允许 4xx 状态码通过，我们会手动处理
+        validateStatus: (status) => status < 500 // allow 4xx through so we can provide consistent messaging
       });
       
-      console.error(`✅ Semantic Scholar API Response: ${response.status} ${response.statusText}`);
+      logDebug(`Semantic Scholar API Response: ${response.status} ${response.statusText}`);
       
       // 处理可能的错误响应
-      if (response.status === 429) {
-        console.error('⚠️ Rate limit exceeded for Semantic Scholar API. Please wait before making more requests.');
-        throw new Error('Rate limit exceeded. Please try again later.');
-      }
-      
       if (response.status >= 400) {
-        console.error(`❌ Semantic Scholar API Error: ${response.status} - ${response.data?.message || 'Unknown error'}`);
-        throw new Error(`API Error: ${response.status}`);
+        // Convert non-throwing 4xx response to unified error handling
+        this.handleHttpError({ response, config: response.config }, 'search');
       }
       
       const papers = this.parseSearchResponse(response.data);
-      console.error(`📄 Semantic Scholar Parsed ${papers.length} papers`);
+      logDebug(`Semantic Scholar Parsed ${papers.length} papers`);
       
       return papers;
     } catch (error: any) {
-      console.error(`❌ Semantic Scholar Search Error:`, error.message);
+      logDebug('Semantic Scholar Search Error:', error.message);
       
       // 处理速率限制错误
       if (error.response?.status === 429) {
         const retryAfter = error.response.headers['retry-after'];
-        console.error(`Rate limited by Semantic Scholar API. ${retryAfter ? `Retry after ${retryAfter} seconds.` : 'Please wait before making more requests.'}`);
+        logDebug(
+          `Rate limited by Semantic Scholar API. ${retryAfter ? `Retry after ${retryAfter} seconds.` : 'Please wait before making more requests.'}`
+        );
       }
       
       // 处理API限制错误
       if (error.response?.status === 403) {
-        console.error('Access denied. Please check your API key or ensure you are within the free tier limits.');
-      }
-      
-      // 如果是网络错误，返回空结果而不是抛出异常
-      if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'TIMEOUT') {
-        console.error('⚠️ Network error accessing Semantic Scholar API, returning empty results.');
-        return [];
+        logDebug('Access denied. Please check your API key or ensure you are within the free tier limits.');
       }
       
       this.handleHttpError(error, 'search');
@@ -210,7 +203,7 @@ export class SemanticScholarSearcher extends PaperSource {
 
       const url = `${this.baseApiUrl}/paper/${paperId}`;
       const headers: Record<string, string> = {
-        'User-Agent': 'Paper-Search-MCP/1.0 (Academic Research Tool)',
+        'User-Agent': USER_AGENT,
         'Accept': 'application/json'
       };
 
@@ -221,14 +214,14 @@ export class SemanticScholarSearcher extends PaperSource {
       const response = await axios.get(url, { 
         params, 
         headers, 
-        timeout: 30000,
+        timeout: TIMEOUTS.DEFAULT,
         maxRedirects: 5,
         validateStatus: (status) => status < 500
       });
       
       return this.parseSemanticPaper(response.data);
     } catch (error: any) {
-      console.error('Error getting paper details from Semantic Scholar:', error.message);
+      logDebug('Error getting paper details from Semantic Scholar:', error.message);
       return null;
     }
   }
@@ -261,7 +254,7 @@ export class SemanticScholarSearcher extends PaperSource {
 
       const response = await axios.get(paper.pdfUrl, {
         responseType: 'stream',
-        timeout: 60000,
+        timeout: TIMEOUTS.DOWNLOAD,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
@@ -306,14 +299,14 @@ export class SemanticScholarSearcher extends PaperSource {
     // Clean and validate DOI
     const doiResult = sanitizeDoi(doi);
     if (!doiResult.valid) {
-      console.error('Invalid DOI format:', doi, doiResult.error);
+      logDebug('Invalid DOI format:', doiResult.error);
       return null;
     }
 
     try {
       return await this.getPaperDetails(`DOI:${doiResult.sanitized}`);
     } catch (error) {
-      console.error('Error getting paper by DOI from Semantic Scholar:', error);
+      logDebug('Error getting paper by DOI from Semantic Scholar:', error);
       return null;
     }
   }
@@ -393,7 +386,7 @@ export class SemanticScholarSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing Semantic Scholar paper:', error);
+      logDebug('Error parsing Semantic Scholar paper:', error);
       return null;
     }
   }

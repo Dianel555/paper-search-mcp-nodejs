@@ -17,6 +17,8 @@ import { sanitizeDoi, escapeQueryValue, withTimeout, validateQueryComplexity } f
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { logDebug, logWarn } from '../utils/Logger.js';
+import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 
 interface SpringerResponse {
   // Meta v2 API structure
@@ -73,16 +75,20 @@ export class SpringerSearcher extends PaperSource {
     // Use v2 API endpoint for metadata
     this.metadataClient = axios.create({
       baseURL: 'https://api.springernature.com/meta/v2',
+      timeout: TIMEOUTS.DEFAULT,
       headers: {
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'User-Agent': USER_AGENT
       }
     });
 
     // OpenAccess API client (may not be available for all API keys)
     this.openAccessClient = axios.create({
       baseURL: 'https://api.springernature.com/openaccess',
+      timeout: TIMEOUTS.DEFAULT,
       headers: {
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'User-Agent': USER_AGENT
       }
     });
 
@@ -116,7 +122,7 @@ export class SpringerSearcher extends PaperSource {
       
       // Fall back to Meta API if OpenAccess API is not available
       if (useOpenAccess && !this.hasOpenAccessAPI) {
-        console.log('OpenAccess API not available, using Meta API with filtering');
+        logDebug('OpenAccess API not available, using Meta API with filtering');
         useOpenAccess = false;
       }
       
@@ -204,27 +210,26 @@ export class SpringerSearcher extends PaperSource {
 
       return papers;
     } catch (error: any) {
-      console.error('Springer search error:', error.message);
       if (error.response?.status === 401) {
-        throw new Error('Invalid or missing Springer API key. Please check your API key.');
+        this.handleHttpError(error, 'search');
       }
       if (error.response?.status === 403) {
         // Some filters require premium access
-        console.warn('Springer API returned 403 - some filters may require premium access');
+        logWarn('Springer API returned 403 - some filters may require premium access');
         // Try a simpler query without advanced filters
         if (options.year || customOptions.subject) {
-          console.log('Retrying without year/subject filters...');
+          logDebug('Retrying without year/subject filters...');
           const simpleOptions = { ...options };
           delete simpleOptions.year;
           delete (simpleOptions as any).subject;
           return this.search(query, simpleOptions);
         }
-        throw new Error('Springer API access forbidden. Some filters require premium access.');
+        this.handleHttpError(error, 'search');
       }
       if (error.response?.status === 429) {
-        throw new Error('Springer rate limit exceeded. Please try again later.');
+        this.handleHttpError(error, 'search');
       }
-      throw error;
+      this.handleHttpError(error, 'search');
     }
   }
 
@@ -269,7 +274,7 @@ export class SpringerSearcher extends PaperSource {
         publishedDate: result.publicationDate ? new Date(result.publicationDate) : null,
         pdfUrl: pdfUrl,
         url: paperUrl,
-        source: 'Springer',
+        source: 'springer',
         journal: result.publicationName,
         volume: result.volume,
         issue: result.number,
@@ -285,7 +290,7 @@ export class SpringerSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing Springer result:', error);
+      logDebug('Error parsing Springer result:', error);
       return null;
     }
   }
@@ -374,12 +379,12 @@ export class SpringerSearcher extends PaperSource {
       // Add timeout wrapper for Crossref API calls
       return await withTimeout(
         crossref.getCitations(doiValidation.sanitized),
-        10000, // 10 second timeout
+        TIMEOUTS.HEALTH_CHECK,
         'Crossref citation request timed out'
       );
     } catch (error) {
       // Don't log the DOI in case it's sensitive
-      console.error('Error getting Springer citations:', error instanceof Error ? error.message : 'Unknown error');
+      logDebug('Error getting Springer citations:', error instanceof Error ? error.message : 'Unknown error');
       return [];
     }
   }
@@ -406,12 +411,12 @@ export class SpringerSearcher extends PaperSource {
       // Add timeout wrapper for Crossref API calls
       return await withTimeout(
         crossref.getReferences(doiValidation.sanitized),
-        10000, // 10 second timeout
+        TIMEOUTS.HEALTH_CHECK,
         'Crossref references request timed out'
       );
     } catch (error) {
       // Don't log the DOI in case it's sensitive
-      console.error('Error getting Springer references:', error instanceof Error ? error.message : 'Unknown error');
+      logDebug('Error getting Springer references:', error instanceof Error ? error.message : 'Unknown error');
       return [];
     }
   }
@@ -462,15 +467,15 @@ export class SpringerSearcher extends PaperSource {
         }
       });
       this.hasOpenAccessAPI = response.status === 200;
-      console.log('OpenAccess API is available');
+      logDebug('OpenAccess API is available');
     } catch (error: any) {
       if (error.response?.status === 401) {
         this.hasOpenAccessAPI = false;
-        console.log('OpenAccess API is not available (401 Unauthorized - check API key permissions)');
+        logDebug('OpenAccess API is not available (401 Unauthorized - check API key permissions)');
       } else {
         // Network error or other issue, assume not available
         this.hasOpenAccessAPI = false;
-        console.log('OpenAccess API test failed:', error.message);
+        logDebug('OpenAccess API test failed:', error.message);
       }
     }
   }

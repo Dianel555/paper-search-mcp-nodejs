@@ -7,6 +7,8 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
+import { TIMEOUTS } from '../config/constants.js';
+import { logDebug } from '../utils/Logger.js';
 
 interface GoogleScholarOptions extends SearchOptions {
   /** 语言设置 */
@@ -43,7 +45,7 @@ export class GoogleScholarSearcher extends PaperSource {
    * 搜索Google Scholar论文
    */
   async search(query: string, options: GoogleScholarOptions = {}): Promise<Paper[]> {
-    console.error(`🔍 Google Scholar Search: query="${query}"`);
+    logDebug(`Google Scholar Search: query="${query}"`);
     
     try {
       const papers: Paper[] = [];
@@ -59,7 +61,7 @@ export class GoogleScholarSearcher extends PaperSource {
         const response = await this.makeScholarRequest(params);
         
         if (response.status !== 200) {
-          console.error(`❌ Google Scholar HTTP Error: ${response.status}`);
+          logDebug(`Google Scholar HTTP Error: ${response.status}`);
           break;
         }
 
@@ -67,11 +69,11 @@ export class GoogleScholarSearcher extends PaperSource {
         const results = $('.gs_ri'); // 搜索结果容器
 
         if (results.length === 0) {
-          console.error('📋 No more results found');
+          logDebug('Google Scholar: No more results found');
           break;
         }
 
-        console.error(`📊 Found ${results.length} results on page`);
+        logDebug(`Google Scholar: Found ${results.length} results on page`);
 
         // 解析每个结果
         results.each((index, element) => {
@@ -86,7 +88,7 @@ export class GoogleScholarSearcher extends PaperSource {
         start += resultsPerPage;
       }
 
-      console.error(`📄 Google Scholar Results: Found ${papers.length} papers`);
+      logDebug(`Google Scholar Results: Found ${papers.length} papers`);
       return papers;
       
     } catch (error) {
@@ -150,11 +152,11 @@ export class GoogleScholarSearcher extends PaperSource {
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1'
       },
-      timeout: 30000
+      timeout: TIMEOUTS.DEFAULT
     };
 
-    console.error(`🔍 Google Scholar Request: GET ${this.scholarUrl}`);
-    console.error(`📋 Scholar params:`, params);
+    logDebug(`Google Scholar Request: GET ${this.scholarUrl}`);
+    logDebug('Scholar params:', params);
 
     return await axios.get(this.scholarUrl, config);
   }
@@ -210,7 +212,7 @@ export class GoogleScholarSearcher extends PaperSource {
         publishedDate: year ? new Date(year, 0, 1) : null,
         pdfUrl: '', // 需要额外处理PDF链接
         url,
-        source: 'google_scholar',
+        source: 'googlescholar',
         categories: [],
         keywords: [],
         citationCount,
@@ -222,7 +224,7 @@ export class GoogleScholarSearcher extends PaperSource {
         }
       });
     } catch (error) {
-      console.error('Error parsing Google Scholar result:', error);
+      logDebug('Error parsing Google Scholar result:', error);
       return null;
     }
   }
