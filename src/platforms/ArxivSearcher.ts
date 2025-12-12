@@ -60,11 +60,19 @@ export class ArxivSearcher extends PaperSource {
       const searchQuery = this.buildSearchQuery(query, options);
       const url = `${this.baseUrl}/query`;
       
+      // Map sortOrder: arXiv API requires 'ascending' or 'descending'
+      const sortOrderMap: Record<string, string> = {
+        'asc': 'ascending',
+        'desc': 'descending',
+        'ascending': 'ascending',
+        'descending': 'descending'
+      };
+      
       const params = {
         search_query: searchQuery,
         max_results: options.maxResults || 10,
         sortBy: this.mapSortField(options.sortBy || 'relevance'),
-        sortOrder: options.sortOrder || 'descending'
+        sortOrder: sortOrderMap[options.sortOrder || 'desc'] || 'descending'
       };
 
       console.error(`🔍 arXiv API Request: GET ${url}`);

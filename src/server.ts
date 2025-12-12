@@ -27,6 +27,7 @@ import { ScienceDirectSearcher } from './platforms/ScienceDirectSearcher.js';
 import { SpringerSearcher } from './platforms/SpringerSearcher.js';
 import { WileySearcher } from './platforms/WileySearcher.js';
 import { ScopusSearcher } from './platforms/ScopusSearcher.js';
+import { CrossrefSearcher } from './platforms/CrossrefSearcher.js';
 import { PaperFactory, Paper } from './models/Paper.js';
 import { PaperSource } from './platforms/PaperSource.js';
 
@@ -46,7 +47,7 @@ const debugLog = (...messages: any[]) => {
 // 创建MCP服务器实例
 const server = new Server({
   name: 'paper-search-mcp-nodejs',
-  version: '0.2.2'
+  version: '0.2.3'
 }, {
   capabilities: {
     tools: {
@@ -72,6 +73,7 @@ let searchers: {
   springer: SpringerSearcher;
   wiley: WileySearcher;
   scopus: ScopusSearcher;
+  crossref: CrossrefSearcher;
 } | null = null;
 
 const initializeSearchers = () => {
@@ -98,6 +100,7 @@ const initializeSearchers = () => {
   );
   const wileySearcher = new WileySearcher(process.env.WILEY_TDM_TOKEN);
   const scopusSearcher = new ScopusSearcher(process.env.ELSEVIER_API_KEY);
+  const crossrefSearcher = new CrossrefSearcher(process.env.CROSSREF_MAILTO);
 
   searchers = {
     arxiv: arxivSearcher,
@@ -114,7 +117,8 @@ const initializeSearchers = () => {
     sciencedirect: scienceDirectSearcher,
     springer: springerSearcher,
     wiley: wileySearcher,
-    scopus: scopusSearcher
+    scopus: scopusSearcher,
+    crossref: crossrefSearcher
   };
   
   debugLog('✅ Searchers initialized successfully');
@@ -124,7 +128,7 @@ const initializeSearchers = () => {
 // 工具参数类型定义
 interface SearchPapersParams {
   query: string;
-  platform?: 'arxiv' | 'webofscience' | 'pubmed' | 'wos' | 'biorxiv' | 'medrxiv' | 'semantic' | 'iacr' | 'googlescholar' | 'scholar' | 'scihub' | 'sciencedirect' | 'springer' | 'wiley' | 'scopus' | 'all';
+  platform?: 'arxiv' | 'webofscience' | 'pubmed' | 'wos' | 'biorxiv' | 'medrxiv' | 'semantic' | 'iacr' | 'googlescholar' | 'scholar' | 'scihub' | 'sciencedirect' | 'springer' | 'scopus' | 'crossref' | 'all';
   maxResults?: number;
   year?: string;
   author?: string;
@@ -142,6 +146,9 @@ interface SearchArxivParams {
   maxResults?: number;
   category?: string;
   author?: string;
+  year?: string;
+  sortBy?: 'relevance' | 'date' | 'citations';
+  sortOrder?: 'asc' | 'desc';
 }
 
 interface SearchWebOfScienceParams {
@@ -150,6 +157,8 @@ interface SearchWebOfScienceParams {
   year?: string;
   author?: string;
   journal?: string;
+  sortBy?: 'relevance' | 'date' | 'citations' | 'title' | 'author' | 'journal';
+  sortOrder?: 'asc' | 'desc';
 }
 
 interface SearchPubMedParams {
@@ -159,18 +168,21 @@ interface SearchPubMedParams {
   author?: string;
   journal?: string;
   publicationType?: string[];
+  sortBy?: 'relevance' | 'date';
 }
 
 interface SearchBioRxivParams {
   query: string;
   maxResults?: number;
   days?: number;
+  category?: string;
 }
 
 interface SearchMedRxivParams {
   query: string;
   maxResults?: number;
   days?: number;
+  category?: string;
 }
 
 interface SearchSemanticScholarParams {
@@ -252,18 +264,6 @@ interface GetPaperByDoiParams {
 // 定义所有可用工具
 const TOOLS: Tool[] = [
   {
-    name: 'debug_pubmed_test',
-    description: 'Debug PubMed search with detailed logging to bypass MCP cache',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query string' },
-        maxResults: { type: 'number', minimum: 1, maximum: 5, description: 'Maximum number of results' }
-      },
-      required: ['query']
-    }
-  },
-  {
     name: 'search_papers',
     description: 'Search academic papers from multiple sources including arXiv, Web of Science, etc.',
     inputSchema: {
@@ -272,8 +272,8 @@ const TOOLS: Tool[] = [
         query: { type: 'string', description: 'Search query string' },
         platform: { 
           type: 'string', 
-          enum: ['arxiv', 'webofscience', 'pubmed', 'wos', 'biorxiv', 'medrxiv', 'semantic', 'iacr', 'googlescholar', 'scholar', 'scihub', 'sciencedirect', 'springer', 'wiley', 'scopus', 'all'],
-          description: 'Platform to search (arxiv, webofscience/wos, pubmed, biorxiv, medrxiv, semantic, iacr, googlescholar/scholar, scihub, sciencedirect, springer, wiley, scopus, or all)'
+          enum: ['arxiv', 'webofscience', 'pubmed', 'wos', 'biorxiv', 'medrxiv', 'semantic', 'iacr', 'googlescholar', 'scholar', 'scihub', 'sciencedirect', 'springer', 'scopus', 'crossref', 'all'],
+          description: 'Platform to search (default: crossref). Options: arxiv, webofscience/wos, pubmed, biorxiv, medrxiv, semantic, iacr, googlescholar/scholar, scihub, sciencedirect, springer, scopus, crossref, or all. Note: Wiley only supports PDF download by DOI, use download_paper instead.'
         },
         maxResults: { 
           type: 'number', 
@@ -326,7 +326,18 @@ const TOOLS: Tool[] = [
           description: 'Maximum number of results to return'
         },
         category: { type: 'string', description: 'arXiv category filter (e.g., cs.AI, physics.gen-ph)' },
-        author: { type: 'string', description: 'Author name filter' }
+        author: { type: 'string', description: 'Author name filter' },
+        year: { type: 'string', description: 'Year filter (e.g., "2023", "2020-2023")' },
+        sortBy: { 
+          type: 'string', 
+          enum: ['relevance', 'date', 'citations'],
+          description: 'Sort results by field'
+        },
+        sortOrder: { 
+          type: 'string', 
+          enum: ['asc', 'desc'],
+          description: 'Sort order: ascending or descending'
+        }
       },
       required: ['query']
     }
@@ -344,9 +355,19 @@ const TOOLS: Tool[] = [
           maximum: 50,
           description: 'Maximum number of results to return'
         },
-        year: { type: 'string', description: 'Publication year filter' },
+        year: { type: 'string', description: 'Publication year filter (e.g., "2023", "2020-2023")' },
         author: { type: 'string', description: 'Author name filter' },
-        journal: { type: 'string', description: 'Journal name filter' }
+        journal: { type: 'string', description: 'Journal name filter' },
+        sortBy: { 
+          type: 'string', 
+          enum: ['relevance', 'date', 'citations', 'title', 'author', 'journal'],
+          description: 'Sort results by field'
+        },
+        sortOrder: { 
+          type: 'string', 
+          enum: ['asc', 'desc'],
+          description: 'Sort order: ascending or descending'
+        }
       },
       required: ['query']
     }
@@ -371,6 +392,11 @@ const TOOLS: Tool[] = [
           type: 'array', 
           items: { type: 'string' },
           description: 'Publication type filter (e.g., ["Journal Article", "Review"])'
+        },
+        sortBy: { 
+          type: 'string', 
+          enum: ['relevance', 'date'],
+          description: 'Sort results by relevance or date'
         }
       },
       required: ['query']
@@ -392,7 +418,8 @@ const TOOLS: Tool[] = [
         days: { 
           type: 'number', 
           description: 'Number of days to search back (default: 30)' 
-        }
+        },
+        category: { type: 'string', description: 'Category filter (e.g., neuroscience, genomics)' }
       },
       required: ['query']
     }
@@ -412,7 +439,9 @@ const TOOLS: Tool[] = [
         },
         days: { 
           type: 'number', 
-          description: 'Number of days to search back (default: 30)' 
+          description: 'Number of days to search back (default: 30)'
+        },
+        category: { type: 'string', description: 'Category filter (e.g., infectious_diseases, epidemiology)' 
         }
       },
       required: ['query']
@@ -624,25 +653,11 @@ const TOOLS: Tool[] = [
   },
   {
     name: 'search_wiley',
-    description: 'Search academic papers from Wiley Online Library (requires TDM token)',
+    description: 'DEPRECATED: Wiley TDM API does not support keyword search. Use search_crossref to find Wiley articles, then use download_paper with platform="wiley" to download PDFs by DOI.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Search query string' },
-        maxResults: { 
-          type: 'number', 
-          minimum: 1, 
-          maximum: 100,
-          description: 'Maximum number of results to return'
-        },
-        year: { type: 'string', description: 'Year filter (e.g., "2023", "2020-2023")' },
-        author: { type: 'string', description: 'Author name filter' },
-        journal: { type: 'string', description: 'Journal name filter' },
-        subject: { type: 'string', description: 'Subject area filter' },
-        openAccess: { 
-          type: 'boolean', 
-          description: 'Filter for open access articles only' 
-        }
+        query: { type: 'string', description: 'This tool is deprecated. Use search_crossref instead.' }
       },
       required: ['query']
     }
@@ -677,6 +692,35 @@ const TOOLS: Tool[] = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'search_crossref',
+    description: 'Search academic papers from Crossref database. Free API with extensive scholarly metadata coverage across publishers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query string' },
+        maxResults: { 
+          type: 'number', 
+          minimum: 1, 
+          maximum: 100,
+          description: 'Maximum number of results to return'
+        },
+        year: { type: 'string', description: 'Year filter (e.g., "2023", "2020-2023")' },
+        author: { type: 'string', description: 'Author name filter' },
+        sortBy: { 
+          type: 'string', 
+          enum: ['relevance', 'date', 'citations'],
+          description: 'Sort results by relevance, date, or citations'
+        },
+        sortOrder: { 
+          type: 'string', 
+          enum: ['asc', 'desc'],
+          description: 'Sort order: ascending or descending'
+        }
+      },
+      required: ['query']
+    }
   }
 ];
 
@@ -693,7 +737,7 @@ server.setRequestHandler(InitializeRequestSchema, async (request) => {
     },
     serverInfo: {
       name: 'paper-search-mcp-nodejs',
-      version: '0.2.2'
+      version: '0.2.3'
     }
   };
 });
@@ -722,51 +766,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const currentSearchers = initializeSearchers();
     
     switch (name) {
-      case 'debug_pubmed_test': {
-        const params = args as unknown as { query: string; maxResults?: number };
-        const { query, maxResults = 2 } = params;
-        
-        try {
-          // 直接创建新的PubMed搜索器实例进行测试
-          const testSearcher = new PubMedSearcher(process.env.PUBMED_API_KEY);
-          const testResults = await testSearcher.search(query, { maxResults });
-          
-          return {
-            content: [{
-              type: 'text',
-              text: `🧪 DEBUG PUBMED TEST 🧪\\nQuery: "${query}"\\nMaxResults: ${maxResults}\\nAPI Key: ${process.env.PUBMED_API_KEY ? 'SET' : 'NOT SET'}\\nResults: ${testResults.length}\\nFirst Title: ${testResults.length > 0 ? testResults[0].title : 'N/A'}\\n\\nFull Results:\\n${JSON.stringify(testResults.map(p => ({ title: p.title, paperId: p.paperId, authors: p.authors.slice(0, 2) })), null, 2)}`
-            }]
-          };
-        } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `🚨 DEBUG PUBMED ERROR 🚨\\nQuery: "${query}"\\nError: ${error.message}\\nStack: ${error.stack}`
-            }]
-          };
-        }
-      }
-
       case 'search_papers': {
         const params = args as unknown as SearchPapersParams;
-        const { query, platform = 'all', maxResults = 10, year, author, sortBy = 'relevance', sortOrder = 'desc' } = params;
+        const { query, platform = 'crossref', maxResults = 10, year, author, sortBy = 'relevance', sortOrder = 'desc' } = params;
         const results = [];
         const searchOptions = { maxResults, year, author, sortBy, sortOrder };
 
         if (platform === 'all') {
-          // 随机选择一个平台进行搜索
-          const availablePlatforms = Object.keys(currentSearchers).filter(name => name !== 'wos' && name !== 'scholar'); // 跳过别名
-          const randomPlatform = availablePlatforms[Math.floor(Math.random() * availablePlatforms.length)];
-          
-          debugLog(`🎲 Randomly selected platform: ${randomPlatform}`);
+          // 默认使用 crossref 作为主要搜索平台
+          debugLog(`🔍 Using default platform: crossref`);
           
           try {
-            const searcher = currentSearchers[randomPlatform as keyof typeof currentSearchers];
-            const platformResults = await (searcher as PaperSource).search(query, searchOptions);
+            const platformResults = await currentSearchers.crossref.search(query, searchOptions);
             results.push(...platformResults.map((paper: Paper) => PaperFactory.toDict(paper)));
           } catch (error) {
-            debugLog(`Error searching random platform ${randomPlatform}:`, error);
-            // 如果随机平台失败，尝试 arxiv 作为备选
+            debugLog(`Error searching crossref:`, error);
+            // 如果 crossref 失败，尝试 arxiv 作为备选
             try {
               debugLog('🔄 Fallback to arXiv platform');
               const platformResults = await currentSearchers.arxiv.search(query, searchOptions);
@@ -796,13 +811,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_arxiv': {
         const params = args as unknown as SearchArxivParams;
-        const { query, maxResults = 10, category, author } = params;
+        const { query, maxResults = 10, category, author, year, sortBy, sortOrder } = params;
         
         const results = await currentSearchers.arxiv.search(query, { 
           maxResults, 
           category, 
-          author 
-        });
+          author,
+          year,
+          sortBy,
+          sortOrder
+        } as any);
 
         return {
           content: [{
@@ -818,7 +836,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_webofscience': {
         const params = args as unknown as SearchWebOfScienceParams;
-        const { query, maxResults = 10, year, author, journal } = params;
+        const { query, maxResults = 10, year, author, journal, sortBy, sortOrder } = params;
         
         if (!process.env.WOS_API_KEY) {
           throw new Error('Web of Science API key not configured. Please set WOS_API_KEY environment variable.');
@@ -828,8 +846,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           maxResults, 
           year, 
           author, 
-          journal 
-        });
+          journal,
+          sortBy,
+          sortOrder
+        } as any);
 
         return {
           content: [{
@@ -845,10 +865,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_pubmed': {
         const params = args as unknown as SearchPubMedParams;
-        const { query, maxResults = 10, year, author, journal, publicationType } = params;
+        const { query, maxResults = 10, year, author, journal, publicationType, sortBy } = params;
         
         debugLog(`🔍 MCP PubMed Search: query="${query}", maxResults=${maxResults}`);
-        debugLog(`📋 MCP PubMed Search options:`, { maxResults, year, author, journal, publicationType });
+        debugLog(`📋 MCP PubMed Search options:`, { maxResults, year, author, journal, publicationType, sortBy });
         debugLog(`🔧 MCP PubMed Searcher type:`, typeof currentSearchers.pubmed);
         debugLog(`🔧 MCP PubMed Searcher hasApiKey:`, currentSearchers.pubmed.hasApiKey());
         
@@ -858,8 +878,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           year, 
           author, 
           journal,
-          publicationType
-        });
+          publicationType,
+          sortBy
+        } as any);
         debugLog(`⚡ MCP PubMed: searcher.search() completed`);
         
         debugLog(`📄 MCP PubMed Results: Found ${results.length} papers`);
@@ -902,12 +923,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_biorxiv': {
         const params = args as unknown as SearchBioRxivParams;
-        const { query, maxResults = 10, days } = params;
+        const { query, maxResults = 10, days, category } = params;
         
         const results = await currentSearchers.biorxiv.search(query, { 
           maxResults, 
-          days 
-        });
+          days,
+          category
+        } as any);
 
         return {
           content: [{
@@ -923,12 +945,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_medrxiv': {
         const params = args as unknown as SearchMedRxivParams;
-        const { query, maxResults = 10, days } = params;
+        const { query, maxResults = 10, days, category } = params;
         
         const results = await currentSearchers.medrxiv.search(query, { 
           maxResults, 
-          days 
-        });
+          days,
+          category
+        } as any);
 
         return {
           content: [{
@@ -1212,30 +1235,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_wiley': {
-        const params = args as unknown as SearchWileyParams;
-        const { query, maxResults = 10, year, author, journal, subject, openAccess } = params;
-        
-        if (!process.env.WILEY_TDM_TOKEN) {
-          throw new Error('Wiley TDM token not configured. Please set WILEY_TDM_TOKEN environment variable.');
-        }
-
-        const results = await currentSearchers.wiley.search(query, { 
-          maxResults, 
-          year, 
-          author, 
-          journal,
-          subject,
-          openAccess
-        } as any);
-
+        // Wiley TDM API does not support keyword search
         return {
           content: [{
             type: 'text',
-            text: `Found ${results.length} Wiley papers.\n\n${JSON.stringify(
-              results.map((paper: Paper) => PaperFactory.toDict(paper)), 
-              null, 
-              2
-            )}`
+            text: `DEPRECATED: Wiley TDM API does not support keyword search.\n\n` +
+              `To access Wiley content:\n` +
+              `1. Use search_crossref to find Wiley articles (filter by publisher if needed)\n` +
+              `2. Use download_paper with platform="wiley" and the DOI to download the PDF\n\n` +
+              `Example: download_paper(paperId="10.1111/jtsb.12390", platform="wiley")`
           }]
         };
       }
@@ -1263,6 +1271,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: 'text',
             text: `Found ${results.length} Scopus papers.\n\n${JSON.stringify(
+              results.map((paper: Paper) => PaperFactory.toDict(paper)), 
+              null, 
+              2
+            )}`
+          }]
+        };
+      }
+
+      case 'search_crossref': {
+        const params = args as unknown as { 
+          query: string; 
+          maxResults?: number; 
+          year?: string; 
+          author?: string;
+          sortBy?: 'relevance' | 'date' | 'citations';
+          sortOrder?: 'asc' | 'desc';
+        };
+        const { query, maxResults = 10, year, author, sortBy = 'relevance', sortOrder = 'desc' } = params;
+        
+        const results = await currentSearchers.crossref.search(query, { 
+          maxResults, 
+          year, 
+          author,
+          sortBy,
+          sortOrder
+        });
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Found ${results.length} Crossref papers.\n\n${JSON.stringify(
               results.map((paper: Paper) => PaperFactory.toDict(paper)), 
               null, 
               2

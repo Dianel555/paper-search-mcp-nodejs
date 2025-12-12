@@ -1,64 +1,25 @@
 /**
- * Wiley TDM (Text and Data Mining) API Searcher
+ * Wiley TDM (Text and Data Mining) API - PDF Download Only
  * 
  * Documentation: https://onlinelibrary.wiley.com/library-info/resources/text-and-datamining
- * API Endpoints:
- * - Search API: https://api.wiley.com/onlinelibrary/tdm/v1/articles
+ * GitHub Client: https://github.com/WileyLabs/tdm-client
  * 
- * Required: Wiley TDM Token (CR-TDM-Token header)
- * Get token from: https://onlinelibrary.wiley.com/library-info/resources/text-and-datamining
+ * IMPORTANT: Wiley TDM API does NOT support keyword search.
+ * It only supports downloading PDFs by DOI.
+ * For searching Wiley content, use Crossref API with publisher filter.
+ * 
+ * API Endpoint: https://api.wiley.com/onlinelibrary/tdm/v1/articles/{DOI}
+ * Header: Wiley-TDM-Client-Token: <token>
+ * 
+ * Rate limits:
+ * - Up to 3 articles per second
+ * - Up to 60 requests per 10 minutes (build in 10 second delay between requests)
  */
 
 import axios, { AxiosInstance } from 'axios';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
-
-interface WileySearchResponse {
-  items: WileyArticle[];
-  total: number;
-  nextCursor?: string;
-}
-
-interface WileyArticle {
-  doi: string;
-  title: string;
-  authors?: Array<{
-    given: string;
-    family: string;
-    affiliation?: Array<{ name: string }>;
-  }>;
-  published?: {
-    'date-parts': number[][];
-  };
-  'published-print'?: {
-    'date-parts': number[][];
-  };
-  'published-online'?: {
-    'date-parts': number[][];
-  };
-  abstract?: string;
-  URL?: string;
-  'container-title'?: string;
-  volume?: string;
-  issue?: string;
-  page?: string;
-  publisher?: string;
-  subject?: string[];
-  type?: string;
-  ISSN?: string[];
-  license?: Array<{
-    URL: string;
-    'content-version': string;
-    delay: number;
-  }>;
-  link?: Array<{
-    URL: string;
-    'content-type': string;
-    'content-version': string;
-    intended_application: string;
-  }>;
-}
 
 export class WileySearcher extends PaperSource {
   private client: AxiosInstance;
@@ -70,172 +31,47 @@ export class WileySearcher extends PaperSource {
     this.client = axios.create({
       baseURL: 'https://api.wiley.com/onlinelibrary/tdm/v1',
       headers: {
-        'Accept': 'application/json',
-        ...(tdmToken ? { 'CR-TDM-Token': tdmToken } : {})
-      }
+        'Accept': 'application/pdf',
+        ...(tdmToken ? { 'Wiley-TDM-Client-Token': tdmToken } : {})
+      },
+      maxRedirects: 5,
+      timeout: 60000
     });
 
-    // Wiley rate limits:
-    // Conservative estimate: 100 requests per hour
+    // Wiley rate limits: 3 articles/sec, 60 requests/10min
     this.rateLimiter = new RateLimiter({
-      requestsPerSecond: 0.028, // ~100 per hour
+      requestsPerSecond: 0.1, // Conservative: ~6 per minute
       burstCapacity: 3
     });
   }
 
+  /**
+   * Search is NOT supported by Wiley TDM API.
+   * Use Crossref API to search for Wiley articles, then use download() to get PDFs.
+   */
   async search(query: string, options: SearchOptions = {}): Promise<Paper[]> {
-    const customOptions = options as any;
-    if (!this.apiKey) {
-      throw new Error('Wiley TDM token is required');
-    }
-
-    const maxResults = Math.min(options.maxResults || 10, 100);
-    const papers: Paper[] = [];
-
-    try {
-      // Build search filters
-      const filters: string[] = [];
-      
-      // Add query
-      filters.push(`title:${query} OR abstract:${query}`);
-
-      // Add author filter
-      if (options.author) {
-        filters.push(`author:${options.author}`);
-      }
-
-      // Add journal filter
-      if (options.journal) {
-        filters.push(`container-title:"${options.journal}"`);
-      }
-
-      // Add year filter
-      if (options.year) {
-        if (options.year.includes('-')) {
-          const [startYear, endYear] = options.year.split('-');
-          filters.push(`published:${startYear}-01-01:${endYear || '*'}-12-31`);
-        } else {
-          filters.push(`published:${options.year}-01-01:${options.year}-12-31`);
-        }
-      }
-
-      // Add subject filter
-      if (customOptions.subject) {
-        filters.push(`subject:"${customOptions.subject}"`);
-      }
-
-      // Add open access filter
-      if (customOptions.openAccess) {
-        filters.push('license:*');
-      }
-
-      await this.rateLimiter.waitForPermission();
-
-      const response = await this.client.get<WileySearchResponse>('/articles', {
-        params: {
-          filter: filters.join(' AND '),
-          rows: maxResults,
-          offset: 0
-        }
-      });
-
-      if (response.data.items) {
-        for (const article of response.data.items) {
-          const paper = this.parseArticle(article);
-          if (paper) {
-            papers.push(paper);
-          }
-        }
-      }
-
-      return papers;
-    } catch (error: any) {
-      console.error('Wiley search error:', error.message);
-      if (error.response?.status === 401) {
-        throw new Error('Invalid or missing Wiley TDM token');
-      }
-      if (error.response?.status === 429) {
-        throw new Error('Wiley rate limit exceeded. Please try again later.');
-      }
-      throw error;
-    }
+    throw new Error(
+      'Wiley TDM API does not support keyword search. ' +
+      'Use Crossref API (search_crossref) to find Wiley articles by DOI, ' +
+      'then use download_paper with platform="wiley" to download PDFs.'
+    );
   }
 
-  private parseArticle(article: WileyArticle): Paper | null {
-    try {
-      // Extract authors
-      let authors = '';
-      if (article.authors && article.authors.length > 0) {
-        authors = article.authors
-          .map(a => `${a.given} ${a.family}`.trim())
-          .join(', ');
-      }
-
-      // Extract publication date
-      let publishedDate = '';
-      const dateData = article.published || article['published-print'] || article['published-online'];
-      if (dateData && dateData['date-parts'] && dateData['date-parts'][0]) {
-        const [year, month, day] = dateData['date-parts'][0];
-        publishedDate = `${year}${month ? `-${String(month).padStart(2, '0')}` : ''}${day ? `-${String(day).padStart(2, '0')}` : ''}`;
-      }
-
-      // Extract PDF URL if available
-      let pdfUrl: string | undefined;
-      if (article.link) {
-        const pdfLink = article.link.find(l => 
-          l['content-type'] === 'application/pdf' || 
-          l['content-type'] === 'unspecified' && l.URL.includes('.pdf')
-        );
-        if (pdfLink) {
-          pdfUrl = pdfLink.URL;
-        }
-      }
-
-      // Construct paper URL
-      const paperUrl = article.URL || (article.doi ? `https://doi.org/${article.doi}` : undefined);
-
-      return PaperFactory.create({
-        paperId: article.doi || '',
-        title: article.title || '',
-        authors: authors ? authors.split(', ') : [],
-        abstract: article.abstract || '',
-        doi: article.doi,
-        publishedDate: publishedDate ? new Date(publishedDate) : null,
-        pdfUrl: pdfUrl,
-        url: paperUrl,
-        source: 'Wiley',
-        journal: article['container-title'],
-        volume: article.volume,
-        issue: article.issue,
-        pages: article.page,
-        extra: {
-          publisher: article.publisher,
-          type: article.type,
-          subjects: article.subject,
-          issn: article.ISSN,
-          licenses: article.license
-        }
-      });
-    } catch (error) {
-      console.error('Error parsing Wiley article:', error);
-      return null;
-    }
-  }
-
+  /**
+   * Download PDF by DOI using Wiley TDM API
+   * @param doi - The DOI of the article (e.g., "10.1111/jtsb.12390")
+   * @param options - Download options including savePath
+   */
   async downloadPdf(doi: string, options: { savePath?: string } = {}): Promise<string> {
-    // Search for the paper first
-    const papers = await this.search(doi, { maxResults: 1 });
-    
-    if (papers.length === 0) {
-      throw new Error('Paper not found');
+    if (!this.apiKey) {
+      throw new Error('Wiley TDM token is required. Set WILEY_TDM_TOKEN environment variable.');
     }
 
-    const paper = papers[0];
-    if (!paper.pdfUrl) {
-      throw new Error('PDF not available for this paper (may require institutional access)');
+    // Validate DOI format
+    if (!doi || !doi.includes('/')) {
+      throw new Error(`Invalid DOI format: ${doi}`);
     }
 
-    // Download PDF
     const fs = await import('fs');
     const path = await import('path');
     
@@ -244,16 +80,24 @@ export class WileySearcher extends PaperSource {
       fs.mkdirSync(savePath, { recursive: true });
     }
 
-    const fileName = `${doi.replace(/[\/\\:*?"<>|]/g, '_')}.pdf`;
-    const filePath = path.join(savePath, fileName);
+    // Encode DOI for URL (replace / with %2F)
+    const encodedDoi = encodeURIComponent(doi);
+    const url = `/articles/${encodedDoi}`;
+
+    await this.rateLimiter.waitForPermission();
 
     try {
-      const response = await axios.get(paper.pdfUrl, {
+      const response = await this.client.get(url, {
         responseType: 'stream',
         headers: {
-          'CR-TDM-Token': this.apiKey
+          'Wiley-TDM-Client-Token': this.apiKey,
+          'Accept': 'application/pdf'
         }
       });
+
+      // Generate filename from DOI
+      const fileName = `${doi.replace(/[\/\\:*?"<>|]/g, '_')}.pdf`;
+      const filePath = path.join(savePath, fileName);
 
       const writer = fs.createWriteStream(filePath);
       response.data.pipe(writer);
@@ -263,26 +107,54 @@ export class WileySearcher extends PaperSource {
         writer.on('error', reject);
       });
     } catch (error: any) {
+      const status = error.response?.status;
+      const errorMessages: Record<number, string> = {
+        400: 'No TDM Client Token was found in the request',
+        403: 'TDM Client Token is invalid or not registered',
+        404: 'Access denied - you or your institution does not have access to this content. Check your subscription.',
+        429: 'Rate limit exceeded. Please reduce request frequency (max 60 requests per 10 minutes).'
+      };
+      
+      if (status && errorMessages[status]) {
+        throw new Error(`Wiley TDM Error (${status}): ${errorMessages[status]}`);
+      }
       throw new Error(`Failed to download PDF: ${error.message}`);
     }
   }
 
+  /**
+   * Get article metadata and download link (without downloading)
+   */
+  async getArticleInfo(doi: string): Promise<Paper> {
+    // Since TDM API only provides PDF download, we create basic paper info from DOI
+    return PaperFactory.create({
+      paperId: doi,
+      title: `Wiley Article: ${doi}`,
+      authors: [],
+      abstract: '',
+      doi: doi,
+      publishedDate: null,
+      pdfUrl: `https://api.wiley.com/onlinelibrary/tdm/v1/articles/${encodeURIComponent(doi)}`,
+      url: `https://doi.org/${doi}`,
+      source: 'Wiley',
+      extra: {
+        note: 'Use Crossref API for full metadata. This endpoint only provides PDF download.'
+      }
+    });
+  }
+
   getCapabilities(): PlatformCapabilities {
     return {
-      search: true,
-      download: true, // With TDM token
-      fullText: false,
+      search: false, // TDM API does not support search
+      download: true, // PDF download by DOI
+      fullText: true, // Full PDF available
       citations: false,
       requiresApiKey: true,
-      supportedOptions: ['maxResults', 'year', 'author', 'journal']
+      supportedOptions: [] // No search options - only DOI-based download
     };
   }
 
   async readPaper(paperId: string, options: DownloadOptions = {}): Promise<string> {
-    const papers = await this.search(paperId, { maxResults: 1 });
-    if (papers.length === 0) {
-      throw new Error('Paper not found');
-    }
-    return papers[0].abstract || 'Abstract not available';
+    return 'Wiley TDM API only supports PDF download. Use downloadPdf() method with a DOI to get the full PDF.';
   }
 }

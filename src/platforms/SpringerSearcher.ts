@@ -13,6 +13,7 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
+import { sanitizeDoi, escapeQueryValue, withTimeout, validateQueryComplexity } from '../utils/SecurityUtils.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
@@ -61,6 +62,7 @@ export class SpringerSearcher extends PaperSource {
   private rateLimiter: RateLimiter;
   private hasOpenAccessAPI: boolean | undefined;
   private openAccessApiKey?: string;
+  private testingPromise: Promise<void> | null = null;
 
   constructor(apiKey?: string, openAccessApiKey?: string) {
     super('springer', 'https://api.springernature.com', apiKey);
@@ -128,11 +130,13 @@ export class SpringerSearcher extends PaperSource {
 
       // Add filters - Note: Some filters may require premium access
       if (options.author) {
-        params.q += ` name:"${options.author}"`;
+        const sanitizedAuthor = this.sanitizeQueryValue(options.author);
+        params.q += ` name:"${sanitizedAuthor}"`;
       }
 
       if (options.journal) {
-        params.q += ` pub:"${options.journal}"`;
+        const sanitizedJournal = this.sanitizeQueryValue(options.journal);
+        params.q += ` pub:"${sanitizedJournal}"`;
       }
 
       if (options.year) {
@@ -147,7 +151,8 @@ export class SpringerSearcher extends PaperSource {
 
       if (customOptions.subject) {
         // Subject filter may cause 403 for some API keys
-        params.q += ` subject:"${customOptions.subject}"`;
+        const sanitizedSubject = this.sanitizeQueryValue(customOptions.subject);
+        params.q += ` subject:"${sanitizedSubject}"`;
       }
 
       if (customOptions.type) {
@@ -339,22 +344,114 @@ export class SpringerSearcher extends PaperSource {
   getCapabilities(): PlatformCapabilities {
     return {
       search: true,
-      download: true, // For papers with available PDFs
+      download: true,
       fullText: false,
-      citations: false,
+      citations: true,
       requiresApiKey: true,
-      supportedOptions: ['maxResults', 'year', 'author', 'journal']
+      supportedOptions: ['maxResults', 'year', 'author', 'journal', 'openAccess', 'subject', 'type']
     };
   }
 
   /**
+   * 获取引用此论文的文献列表(通过Crossref/OpenCitations)
+   */
+  async getCitations(doi: string): Promise<Paper[]> {
+    try {
+      // Validate DOI format
+      if (!doi || typeof doi !== 'string') {
+        throw new Error('Invalid DOI: must be a non-empty string');
+      }
+
+      // Sanitize and validate DOI
+      const doiValidation = sanitizeDoi(doi);
+      if (!doiValidation.valid) {
+        throw new Error(`Invalid DOI: ${doiValidation.error}`);
+      }
+
+      const { CrossrefSearcher } = await import('./CrossrefSearcher.js');
+      const crossref = new CrossrefSearcher();
+
+      // Add timeout wrapper for Crossref API calls
+      return await withTimeout(
+        crossref.getCitations(doiValidation.sanitized),
+        10000, // 10 second timeout
+        'Crossref citation request timed out'
+      );
+    } catch (error) {
+      // Don't log the DOI in case it's sensitive
+      console.error('Error getting Springer citations:', error instanceof Error ? error.message : 'Unknown error');
+      return [];
+    }
+  }
+
+  /**
+   * 获取论文的参考文献列表(通过Crossref)
+   */
+  async getReferences(doi: string): Promise<Paper[]> {
+    try {
+      // Validate DOI format
+      if (!doi || typeof doi !== 'string') {
+        throw new Error('Invalid DOI: must be a non-empty string');
+      }
+
+      // Sanitize and validate DOI
+      const doiValidation = sanitizeDoi(doi);
+      if (!doiValidation.valid) {
+        throw new Error(`Invalid DOI: ${doiValidation.error}`);
+      }
+
+      const { CrossrefSearcher } = await import('./CrossrefSearcher.js');
+      const crossref = new CrossrefSearcher();
+
+      // Add timeout wrapper for Crossref API calls
+      return await withTimeout(
+        crossref.getReferences(doiValidation.sanitized),
+        10000, // 10 second timeout
+        'Crossref references request timed out'
+      );
+    } catch (error) {
+      // Don't log the DOI in case it's sensitive
+      console.error('Error getting Springer references:', error instanceof Error ? error.message : 'Unknown error');
+      return [];
+    }
+  }
+
+  /**
+   * 清理和转义查询参数中的特殊字符
+   */
+  private sanitizeQueryValue(value: string, context: 'author' | 'journal' | 'subject' | 'general' = 'general'): string {
+    return escapeQueryValue(value, 'springer');
+  }
+
+  /**
    * Test if OpenAccess API is available for this API key
+   * Uses promise caching to prevent race conditions with concurrent requests
    */
   private async testOpenAccessAPI(): Promise<void> {
+    // Already tested
     if (this.hasOpenAccessAPI !== undefined) {
       return;
     }
     
+    // Test already in progress - wait for it
+    if (this.testingPromise) {
+      return this.testingPromise;
+    }
+    
+    // Start new test and cache the promise
+    this.testingPromise = this.performOpenAccessTest();
+    
+    try {
+      await this.testingPromise;
+    } finally {
+      this.testingPromise = null;
+    }
+  }
+
+  /**
+   * Perform the actual OpenAccess API test
+   */
+  private async performOpenAccessTest(): Promise<void> {
     try {
       const response = await this.openAccessClient.get('/json', {
         params: {

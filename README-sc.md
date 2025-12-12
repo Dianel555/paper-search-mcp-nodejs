@@ -1,16 +1,17 @@
 # Paper Search MCP (Node.js)
 
 ##  中文|[English](README.md)
-一个基于Node.js的模型上下文协议(MCP)服务器，用于搜索和下载多个学术数据库的论文，包括arXiv、Web of Science、PubMed、Google Scholar、Sci-Hub、ScienceDirect、Springer、Wiley、Scopus等**13个学术平台**。
+一个基于Node.js的模型上下文协议(MCP)服务器，用于搜索和下载多个学术数据库的论文，包括arXiv、Web of Science、PubMed、Google Scholar、Sci-Hub、ScienceDirect、Springer、Wiley、Scopus、Crossref等**14个学术平台**。
 
 ![Node.js](https://img.shields.io/badge/node.js->=18.0.0-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platforms](https://img.shields.io/badge/platforms-13-brightgreen.svg)
+![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)
 
 ## ✨ 核心特性
 
-- **🌍 13个学术平台**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus
+- **🌍 14个学术平台**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus, Crossref
 - **🔗 MCP协议集成**: 与Claude Desktop和其他AI助手无缝集成
 - **📊 统一数据模型**: 标准化的论文数据格式，支持所有平台
 - **⚡ 高性能搜索**: 并发搜索和智能速率限制
@@ -22,8 +23,9 @@
 
 | 平台 | 搜索 | 下载 | 全文 | 被引统计 | API密钥 | 特色功能 |
 |------|------|------|------|----------|---------|----------|
+| **Crossref** | ✅ | ❌ | ❌ | ✅ | ❌ | 默认搜索平台，广泛的元数据覆盖 |
 | **arXiv** | ✅ | ✅ | ✅ | ❌ | ❌ | 物理/计算机科学预印本 |
-| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 高质量期刊索引 |
+| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 多主题搜索、日期排序、年份范围 |
 | **PubMed** | ✅ | ❌ | ❌ | ❌ | 🟡 可选 | 生物医学文献 |
 | **Google Scholar** | ✅ | ❌ | ❌ | ✅ | ❌ | 广泛学术搜索 |
 | **bioRxiv** | ✅ | ✅ | ✅ | ❌ | ❌ | 生物学预印本 |
@@ -33,10 +35,12 @@
 | **Sci-Hub** | ✅ | ✅ | ❌ | ❌ | ❌ | 通过DOI获取论文 |
 | **ScienceDirect** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 爱思唯尔全文数据库 |
 | **Springer Nature** | ✅ | ✅* | ❌ | ❌ | ✅ 必需 | 双API：Meta v2 & OpenAccess |
-| **Wiley** | ✅ | ✅ | ❌ | ❌ | ✅ 必需 | 文本数据挖掘API |
+| **Wiley** | ❌ | ✅ | ✅ | ❌ | ✅ 必需 | TDM API：仅支持DOI下载PDF |
 | **Scopus** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 最大引文数据库 |
 
 ✅ 已支持 | ❌ 不支持 | 🟡 可选 | ✅* 仅开放获取
+
+> **注意**: Wiley TDM API不支持关键词搜索。请使用`search_crossref`搜索Wiley文章获取DOI，然后使用`download_paper`配合`platform="wiley"`通过DOI下载PDF。
 
 ## 🚀 快速开始
 
@@ -180,9 +184,26 @@ search_papers({
 ```
 
 **平台选择行为：**
+- `platform: "crossref"` (默认) - 免费API，广泛的学术元数据覆盖
 - `platform: "all"` - 随机选择一个平台进行高效、聚焦的搜索
 - 特定平台 - 仅搜索指定平台
-- 可用平台: `arxiv`, `webofscience`/`wos`, `pubmed`, `biorxiv`, `medrxiv`, `semantic`, `iacr`, `googlescholar`/`scholar`, `scihub`, `sciencedirect`, `springer`, `wiley`, `scopus`
+- 可用平台: `crossref`, `arxiv`, `webofscience`/`wos`, `pubmed`, `biorxiv`, `medrxiv`, `semantic`, `iacr`, `googlescholar`/`scholar`, `scihub`, `sciencedirect`, `springer`, `scopus`
+- 注意: `wiley`仅支持通过DOI下载PDF，不支持关键词搜索
+
+### `search_crossref`
+搜索Crossref学术数据库（默认搜索平台）
+
+```typescript
+search_crossref({
+  query: "machine learning",
+  maxResults: 10,
+  year: "2023",
+  author: "Smith",
+  sortBy: "relevance",  // 或 "date", "citations"
+  sortOrder: "desc"
+})
+```
+
 ### `search_arxiv`
 专门搜索arXiv预印本
 
@@ -191,7 +212,10 @@ search_arxiv({
   query: "transformer neural networks",
   maxResults: 10,
   category: "cs.AI",
-  author: "Attention"
+  author: "Vaswani",
+  year: "2023",
+  sortBy: "date",      // relevance, date, citations
+  sortOrder: "desc"    // asc, desc
 })
 ```
 
@@ -217,7 +241,8 @@ search_pubmed({
   year: "2023",
   author: "Smith",
   journal: "New England Journal of Medicine",
-  publicationType: ["Journal Article", "Clinical Trial"]
+  publicationType: ["Journal Article", "Clinical Trial"],
+  sortBy: "date"       // relevance, date
 })
 ```
 
@@ -241,7 +266,15 @@ search_google_scholar({
 search_biorxiv({
   query: "CRISPR",
   maxResults: 15,
-  days: 30
+  days: 30,
+  category: "genomics"  // neuroscience, genomics等
+})
+
+search_medrxiv({
+  query: "COVID-19",
+  maxResults: 10,
+  days: 30,
+  category: "infectious_diseases"
 })
 ```
 
@@ -287,37 +320,40 @@ search_sciencedirect({
   query: "artificial intelligence",
   maxResults: 10,
   year: "2023",
+  author: "Smith",
   openAccess: true  // 仅搜索开放获取论文
 })
 ```
 
 ### `search_springer`
-搜索Springer Nature数据库
+搜索Springer Nature数据库（Metadata API v2 或 OpenAccess API）
 
 ```typescript
-// 搜索所有Springer内容
 search_springer({
   query: "machine learning",
-  maxResults: 10
-})
-
-// 仅搜索开放获取论文
-search_springer({
-  query: "COVID-19",
-  openAccess: true,  // 使用OpenAccess API（如果可用）
-  maxResults: 5
+  maxResults: 10,
+  year: "2023",
+  openAccess: true,  // 使用OpenAccess API获取可下载PDF
+  type: "Journal"    // 过滤类型: Journal, Book, Chapter
 })
 ```
 
-### `search_wiley`
-搜索Wiley在线图书馆
+### `search_wiley` (已废弃)
+> **注意**: Wiley TDM API不支持关键词搜索。请使用`search_crossref`搜索Wiley文章，然后使用`download_paper`通过DOI下载PDF。
 
 ```typescript
-search_wiley({
+// 正确的Wiley使用方式：
+// 1. 使用Crossref搜索Wiley文章
+search_crossref({
   query: "cancer research",
-  maxResults: 10,
-  year: "2023",
-  openAccess: true
+  maxResults: 10
+})
+
+// 2. 使用download_paper通过DOI下载PDF
+download_paper({
+  paperId: "10.1111/xxx.12345",
+  platform: "wiley",
+  savePath: "./downloads"
 })
 ```
 
@@ -414,8 +450,9 @@ src/
 │   ├── SciHubSearcher.ts     # Sci-Hub搜索器（带镜像管理）
 │   ├── ScienceDirectSearcher.ts # ScienceDirect（爱思唯尔）搜索器
 │   ├── SpringerSearcher.ts   # Springer Nature搜索器（Meta v2 & OpenAccess API）
-│   ├── WileySearcher.ts      # Wiley TDM API搜索器
-│   └── ScopusSearcher.ts     # Scopus引文数据库搜索器
+│   ├── WileySearcher.ts      # Wiley TDM API（仅DOI下载）
+│   ├── ScopusSearcher.ts     # Scopus引文数据库搜索器
+│   └── CrossrefSearcher.ts   # Crossref API搜索器（默认平台）
 ├── utils/
 │   └── RateLimiter.ts        # 令牌桶速率限制器
 └── server.ts                 # MCP服务器主文件
@@ -460,6 +497,8 @@ Springer Nature提供两个API：
 
 ### Web of Science 特性
 
+🎯 **最新修复 (v0.2.2)**: 多主题搜索、日期排序和年份范围过滤现已正常工作！
+
 ### 支持的API
 
 - **Web of Science Starter API**: 基础搜索和被引统计
@@ -468,33 +507,73 @@ Springer Nature提供两个API：
 ### 高级搜索语法
 
 ```typescript
-// 使用Web of Science查询语法
+// 多主题搜索 (v0.2.2已修复)
+search_webofscience({
+  query: 'oriented structure',
+  year: '2023-2025',
+  sortBy: 'date',
+  sortOrder: 'desc',
+  maxResults: 10
+})
+
+// 年份范围过滤 (v0.2.2新功能)
+search_webofscience({
+  query: 'machine learning',
+  year: '2020-2024',  // 现在支持范围格式
+  sortBy: 'citations',
+  sortOrder: 'desc'
+})
+
+// 高级查询与过滤器
+search_webofscience({
+  query: 'blockchain',
+  author: 'zhang',
+  journal: 'Nature',
+  year: '2023',
+  sortBy: 'date',
+  sortOrder: 'desc'
+})
+
+// 传统WOS查询语法仍支持
 search_webofscience({
   query: 'TS="machine learning" AND PY=2023',
   maxResults: 20
 })
-
-// 作者搜索
-search_webofscience({
-  query: 'AU="Smith, J*"',
-  maxResults: 10
-})
-
-// 期刊搜索
-search_webofscience({
-  query: 'SO="Nature" AND PY=2022-2023',
-  maxResults: 15
-})
 ```
 
-### 支持的字段
+**🔧 v0.2.2 改进:**
+- ✅ **多主题搜索**: "oriented structure"等复杂关键词现在能正确工作
+- ✅ **日期排序**: 修复了API参数映射，实现正确的日期排序
+- ✅ **排序顺序**: 新增对升序/降序排序的支持
+- ✅ **年份范围**: 支持"2020-2023"等年份范围搜索
+- ✅ **查询转义**: 正确处理搜索词中的特殊字符
 
+**支持的搜索选项:**
+- `query`: 搜索词 (支持多主题)
+- `year`: 单个年份"2023"或范围"2020-2023"
+- `author`: 作者名过滤
+- `journal`: 期刊/来源过滤
+- `sortBy`: 排序字段 (`date`, `citations`, `relevance`, `title`, `author`, `journal`)
+- `sortOrder`: 排序方向 (`asc`, `desc`)
+- `maxResults`: 最大结果数 (1-100)
+
+**支持的WOS字段:**
 - `TS`: 主题搜索
 - `AU`: 作者
 - `SO`: 来源期刊
 - `PY`: 发表年份
 - `DO`: DOI
 - `TI`: 标题
+
+**🔧 调试WOS问题:**
+```bash
+# 启用详细的WOS API日志
+export WOS_VERBOSE_LOGGING=true
+# 或在.env文件中设置: WOS_VERBOSE_LOGGING=true
+
+# 启用开发模式获取额外调试信息
+export NODE_ENV=development
+```
 
 ## 🔑 API密钥需求
 

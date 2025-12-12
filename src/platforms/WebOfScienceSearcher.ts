@@ -6,14 +6,27 @@
 import axios, { AxiosResponse } from 'axios';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
+import { escapeQueryValue, validateQueryComplexity, withTimeout } from '../utils/SecurityUtils.js';
 
 interface WoSSearchOptions extends SearchOptions {
   /** 数据库选择 */
   databases?: string[];
-  /** 文档类型 */
+  /** 文档类型过滤 (Article, Review, etc.) */
   documentTypes?: string[];
   /** 语言过滤 */
   languages?: string[];
+  /** ISSN/ISBN过滤 */
+  issn?: string;
+  /** 卷号过滤 */
+  volume?: string;
+  /** 页码过滤 */
+  page?: string;
+  /** 期号过滤 */
+  issue?: string;
+  /** PubMed ID过滤 */
+  pmid?: string;
+  /** DOI过滤 */
+  doi?: string;
 }
 
 interface WoSApiResponse {
@@ -82,12 +95,91 @@ export class WebOfScienceSearcher extends PaperSource {
   getCapabilities(): PlatformCapabilities {
     return {
       search: true,
-      download: false, // WoS 通常不提供直接PDF下载
-      fullText: false, // 通常只有元数据
+      download: false,
+      fullText: false,
       citations: true,
       requiresApiKey: true,
       supportedOptions: ['maxResults', 'year', 'author', 'journal', 'sortBy', 'sortOrder']
     };
+  }
+
+  /**
+   * 获取论文的参考文献ID列表
+   */
+  async getReferenceIds(uid: string): Promise<string[]> {
+    if (!this.apiKey) return [];
+
+    try {
+      const response = await this.makeApiRequest(`/documents/${uid}/references`, {
+        method: 'GET',
+        params: {
+          db: 'WOS',
+          limit: 50
+        }
+      });
+
+      const hits = response.data?.hits || [];
+      return hits.map((hit: any) => hit.uid).filter(Boolean);
+    } catch (error) {
+      console.error(`Error getting reference IDs for UT ${uid}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * 获取引用此论文的文献ID列表
+   */
+  async getCitationIds(uid: string): Promise<string[]> {
+    if (!this.apiKey) return [];
+
+    try {
+      const response = await this.makeApiRequest(`/documents/${uid}/citing`, {
+        method: 'GET',
+        params: {
+          db: 'WOS',
+          limit: 100
+        }
+      });
+
+      const hits = response.data?.hits || [];
+      return hits.map((hit: any) => hit.uid).filter(Boolean);
+    } catch (error) {
+      console.error(`Error getting citation IDs for UT ${uid}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * 获取论文详情（包含references和citations ID列表）
+   */
+  async getPaperWithCitations(uid: string): Promise<Paper | null> {
+    try {
+      const query = uid.includes('/') ? `DO="${uid}"` : `UT="${uid}"`;
+      const results = await this.search(query, { maxResults: 1 });
+      
+      if (results.length === 0) return null;
+      
+      const paper = results[0];
+      const paperUid = paper.extra?.uid;
+      
+      if (paperUid) {
+        const [refIds, citIds] = await Promise.all([
+          this.getReferenceIds(paperUid),
+          this.getCitationIds(paperUid)
+        ]);
+        
+        paper.references = refIds;
+        paper.extra = {
+          ...paper.extra,
+          citationIds: citIds
+        };
+      }
+      
+      return paper;
+    } catch (error) {
+      console.error('Error getting paper with citations:', error);
+      return null;
+    }
   }
 
   /**
@@ -179,7 +271,7 @@ export class WebOfScienceSearcher extends PaperSource {
     // 添加排序参数 - 使用正确的API参数名
     if (options.sortBy) {
       const sortField = this.mapSortField(options.sortBy);
-      params.sortBy = sortField; // 修正参数名从sortField到sortBy
+      params.sortField = sortField; // WoS API使用sortField参数
 
       // 添加排序顺序
       if (options.sortOrder) {
@@ -196,17 +288,29 @@ export class WebOfScienceSearcher extends PaperSource {
   private buildWosQuery(query: string, options: WoSSearchOptions): string {
     const queryParts: string[] = [];
 
+    // Validate query complexity first
+    const complexityCheck = validateQueryComplexity(query, {
+      maxLength: 1000,
+      maxBooleanOperators: 10
+    });
+    if (!complexityCheck.valid) {
+      throw new Error(complexityCheck.error);
+    }
+
     // 处理主题搜索 - 支持多个关键词
     if (query && query.trim()) {
-      // 转义特殊字符并处理多主题搜索
-      const escapedQuery = this.escapeWosQuery(query);
-
       // 检查是否已经包含WOS字段标签
-      if (escapedQuery.includes('=')) {
-        // 用户提供了带字段标签的查询
-        queryParts.push(escapedQuery);
+      // Supported field tags: TI, IS, SO, VL, PG, CS, PY, FPY, DOP, AU, AI, UT, DO, DT, PMID, OG, TS, SUR
+      const wosFieldTags = ['TS=', 'TI=', 'AU=', 'SO=', 'PY=', 'DO=', 'IS=', 'VL=', 'PG=', 'CS=', 
+                           'DT=', 'PMID=', 'FPY=', 'DOP=', 'AI=', 'UT=', 'OG=', 'SUR='];
+      const hasFieldTag = wosFieldTags.some(tag => query.toUpperCase().includes(tag));
+      
+      if (hasFieldTag) {
+        // 用户提供了带字段标签的查询，直接使用（不进行转义）
+        queryParts.push(query);
       } else {
         // 简单查询，使用TS(Topic)字段
+        const escapedQuery = escapeQueryValue(query, 'wos');
         queryParts.push(`TS=(${escapedQuery})`);
       }
     }
@@ -225,14 +329,50 @@ export class WebOfScienceSearcher extends PaperSource {
 
     // 添加作者过滤
     if (options.author) {
-      const escapedAuthor = this.escapeWosQuery(options.author);
+      const escapedAuthor = escapeQueryValue(options.author, 'wos');
       queryParts.push(`AU=(${escapedAuthor})`);
     }
 
     // 添加期刊过滤
     if (options.journal) {
-      const escapedJournal = this.escapeWosQuery(options.journal);
+      const escapedJournal = escapeQueryValue(options.journal, 'wos');
       queryParts.push(`SO=(${escapedJournal})`);
+    }
+
+    // 添加ISSN/ISBN过滤 (IS field tag)
+    if (options.issn) {
+      queryParts.push(`IS=${options.issn}`);
+    }
+
+    // 添加卷号过滤 (VL field tag)
+    if (options.volume) {
+      queryParts.push(`VL=${options.volume}`);
+    }
+
+    // 添加页码过滤 (PG field tag)
+    if (options.page) {
+      queryParts.push(`PG=${options.page}`);
+    }
+
+    // 添加期号过滤 (CS field tag - Issue)
+    if (options.issue) {
+      queryParts.push(`CS=${options.issue}`);
+    }
+
+    // 添加文档类型过滤 (DT field tag)
+    if (options.documentTypes && options.documentTypes.length > 0) {
+      const dtQuery = options.documentTypes.map(dt => `"${dt}"`).join(' OR ');
+      queryParts.push(`DT=(${dtQuery})`);
+    }
+
+    // 添加PubMed ID过滤 (PMID field tag)
+    if (options.pmid) {
+      queryParts.push(`PMID=${options.pmid}`);
+    }
+
+    // 添加DOI过滤 (DO field tag)
+    if (options.doi) {
+      queryParts.push(`DO="${options.doi}"`);
     }
 
     // 用AND连接所有查询部分
@@ -276,7 +416,9 @@ export class WebOfScienceSearcher extends PaperSource {
       return [];
     }
 
-    console.error(`📊 WoS: Found ${data.hits.length} hits out of ${data.metadata?.total || 0} total`);
+    if (process.env.NODE_ENV === 'development' || process.env.WOS_VERBOSE_LOGGING === 'true') {
+      console.error(`📊 WoS: Found ${data.hits.length} hits out of ${data.metadata?.total || 0} total`);
+    }
     return data.hits.map(record => this.parseWoSRecord(record))
       .filter(paper => paper !== null) as Paper[];
   }

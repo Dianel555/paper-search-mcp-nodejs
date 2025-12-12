@@ -4,6 +4,7 @@
  */
 
 import { Paper } from '../models/Paper.js';
+import { sanitizeRequest, maskSensitiveData } from '../utils/SecurityUtils.js';
 
 export interface SearchOptions {
   /** 最大结果数量 */
@@ -26,6 +27,18 @@ export interface SearchOptions {
   fetchDetails?: boolean;
   /** 研究领域过滤 (Semantic Scholar) */
   fieldsOfStudy?: string[];
+  /** 开放获取过滤 (Springer/ScienceDirect/Scopus) */
+  openAccess?: boolean;
+  /** 主题过滤 (Springer/Scopus) */
+  subject?: string;
+  /** 出版物类型过滤 (Springer) */
+  type?: 'Journal' | 'Book' | 'Chapter';
+  /** 机构过滤 (Scopus) */
+  affiliation?: string;
+  /** 文档类型过滤 (Scopus) */
+  documentType?: 'ar' | 'cp' | 're' | 'bk' | 'ch';
+  /** 出版物类型 (PubMed) */
+  publicationType?: string[];
 }
 
 export interface DownloadOptions {
@@ -159,22 +172,26 @@ export abstract class PaperSource {
     const status = error.response?.status;
     const url = error.config?.url;
     const method = error.config?.method?.toUpperCase();
-    
-    // 详细错误信息用于调试
+
+    // Sanitize the entire request configuration (using imported functions)
+    const sanitizedConfig = sanitizeRequest(error.config);
+
+    // Mask sensitive parts of the URL
+    const sanitizedUrl = url ? maskSensitiveData(url) : url;
+
+    // 详细错误信息用于调试（已清理敏感信息）
     console.error(`❌ ${this.platformName} ${operation} Error Details:`, {
       status,
-      message,
-      url,
+      message: maskSensitiveData(message),
+      url: sanitizedUrl,
       method,
       responseData: error.response?.data,
-      requestConfig: {
-        params: error.config?.params,
-        headers: error.config?.headers
-      }
+      requestConfig: sanitizedConfig,
+      timestamp: new Date().toISOString()
     });
-    
+
     throw new Error(
-      `${this.platformName} ${operation} failed${status ? ` (${status})` : ''}: ${message}. URL: ${method} ${url}`
+      `${this.platformName} ${operation} failed${status ? ` (${status})` : ''}: ${message}. URL: ${method} ${sanitizedUrl}`
     );
   }
 

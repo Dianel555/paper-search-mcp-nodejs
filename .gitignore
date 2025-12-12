@@ -111,6 +111,7 @@ profile-*
 
 #claude
 .claude/
+claudedocs/
 
 # Downloads directory (for PDF files)
 downloads/

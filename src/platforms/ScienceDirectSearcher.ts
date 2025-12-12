@@ -103,55 +103,58 @@ export class ScienceDirectSearcher extends PaperSource {
       throw new Error('ScienceDirect API key is required');
     }
 
-    const maxResults = options.maxResults || 10;
+    const maxResults = Math.min(options.maxResults || 10, 100);
     const papers: Paper[] = [];
 
     try {
-      // Build search query
-      let searchQuery = query;
-      
-      if (options.author) {
-        searchQuery += ` AND AUTHOR(${options.author})`;
-      }
-      
-      if (options.journal) {
-        searchQuery += ` AND SRCTITLE(${options.journal})`;
-      }
-      
+      // Use PUT method with new API format (matching Python implementation)
+      const requestBody: any = {
+        qs: query
+      };
+
+      // Add year filter
       if (options.year) {
         if (options.year.includes('-')) {
           const [startYear, endYear] = options.year.split('-');
-          searchQuery += ` AND PUBYEAR > ${parseInt(startYear) - 1}`;
-          if (endYear) {
-            searchQuery += ` AND PUBYEAR < ${parseInt(endYear) + 1}`;
-          }
+          requestBody.date = endYear ? `${startYear}-${endYear}` : startYear;
         } else {
-          searchQuery += ` AND PUBYEAR = ${options.year}`;
+          requestBody.date = options.year;
         }
       }
 
-      if (customOptions.openAccess) {
-        searchQuery += ' AND OPENACCESS(1)';
+      // Add author filter
+      if (options.author) {
+        requestBody.authors = options.author;
       }
+
+      // Display options
+      requestBody.display = {
+        offset: 0,
+        show: maxResults,
+        sortBy: options.sortBy === 'date' ? 'date' : 'relevance'
+      };
 
       await this.rateLimiter.waitForPermission();
 
-      const response = await this.client.get<ElsevierSearchResponse>('/content/search/sciencedirect', {
-        params: {
-          query: searchQuery,
-          count: maxResults,
-          start: 0,
-          view: 'COMPLETE'
+      const response = await this.client.put('/content/search/sciencedirect', requestBody, {
+        headers: {
+          'Content-Type': 'application/json'
         }
       });
 
-      const entries = response.data['search-results']?.entry || [];
+      const results = response.data?.results || [];
 
-      for (const entry of entries) {
-        const paper = await this.parseEntry(entry);
+      for (const result of results) {
+        const paper = this.parseNewApiResult(result);
         if (paper) {
           papers.push(paper);
         }
+      }
+
+      // Enrich with abstracts if requested
+      if (customOptions.includeAbstract && papers.length > 0) {
+        const enrichedPapers = await this.enrichPapersWithAbstracts(papers);
+        return enrichedPapers;
       }
 
       return papers;
@@ -165,6 +168,91 @@ export class ScienceDirectSearcher extends PaperSource {
       }
       throw error;
     }
+  }
+
+  /**
+   * Parse result from new PUT API format
+   */
+  private parseNewApiResult(result: any): Paper | null {
+    try {
+      // Parse publication date
+      let publishedDate: Date | null = null;
+      let year: number | undefined;
+      const pubDateStr = result.publicationDate;
+      if (pubDateStr) {
+        try {
+          publishedDate = new Date(pubDateStr);
+          year = publishedDate.getFullYear();
+        } catch {
+          if (pubDateStr.length >= 4) {
+            year = parseInt(pubDateStr.substring(0, 4));
+          }
+        }
+      }
+
+      // Parse authors
+      const authors: string[] = [];
+      const authorsData = result.authors || [];
+      if (Array.isArray(authorsData)) {
+        const sortedAuthors = [...authorsData].sort((a, b) => (a.order || 999) - (b.order || 999));
+        for (const author of sortedAuthors) {
+          if (author.name) {
+            authors.push(author.name.trim());
+          }
+        }
+      }
+
+      return PaperFactory.create({
+        paperId: result.pii || `scidir_${Date.now()}`,
+        title: result.title || 'No title',
+        authors: authors,
+        abstract: '',
+        doi: result.doi,
+        publishedDate: publishedDate,
+        url: result.uri,
+        source: 'ScienceDirect',
+        journal: result.sourceTitle,
+        year: year,
+        extra: {
+          pii: result.pii,
+          openAccess: result.openAccess || false,
+          volumeIssue: result.volumeIssue,
+          pages: result.pages
+        }
+      });
+    } catch (error) {
+      console.error('Error parsing ScienceDirect result:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Enrich papers with abstracts using Article Retrieval API
+   */
+  private async enrichPapersWithAbstracts(papers: Paper[]): Promise<Paper[]> {
+    const enrichedPapers: Paper[] = [];
+
+    for (const paper of papers) {
+      try {
+        await this.rateLimiter.waitForPermission();
+        
+        const response = await this.client.get(`/content/article/pii/${paper.paperId}`, {
+          params: { view: 'META_ABS' }
+        });
+
+        const coredata = response.data?.['full-text-retrieval-response']?.coredata;
+        if (coredata) {
+          paper.abstract = coredata['dc:description'] || '';
+        }
+        
+        enrichedPapers.push(paper);
+      } catch (error) {
+        // If enrichment fails, keep original paper
+        enrichedPapers.push(paper);
+      }
+    }
+
+    return enrichedPapers;
   }
 
   private async parseEntry(entry: ElsevierEntry): Promise<Paper | null> {
@@ -258,7 +346,7 @@ export class ScienceDirectSearcher extends PaperSource {
   getCapabilities(): PlatformCapabilities {
     return {
       search: true,
-      download: false, // Requires institutional access
+      download: false,
       fullText: false,
       citations: true,
       requiresApiKey: true,
@@ -276,5 +364,47 @@ export class ScienceDirectSearcher extends PaperSource {
       throw new Error('Paper not found');
     }
     return paper.abstract || 'Abstract not available';
+  }
+
+  /**
+   * 获取引用此论文的文献列表(通过Crossref/OpenCitations)
+   */
+  async getCitations(paperId: string): Promise<Paper[]> {
+    try {
+      // Get paper to check DOI
+      const paper = await this.getArticleDetails(paperId);
+      if (!paper || !paper.doi) {
+        console.log(`ScienceDirect paper ${paperId} has no DOI, cannot fetch citations`);
+        return [];
+      }
+
+      const { CrossrefSearcher } = await import('./CrossrefSearcher.js');
+      const crossref = new CrossrefSearcher();
+      return await crossref.getCitations(paper.doi);
+    } catch (error) {
+      console.error('Error getting ScienceDirect citations:', error);
+      return [];
+    }
+  }
+
+  /**
+   * 获取论文的参考文献列表(通过Crossref)
+   */
+  async getReferences(paperId: string): Promise<Paper[]> {
+    try {
+      // Get paper to check DOI
+      const paper = await this.getArticleDetails(paperId);
+      if (!paper || !paper.doi) {
+        console.log(`ScienceDirect paper ${paperId} has no DOI, cannot fetch references`);
+        return [];
+      }
+
+      const { CrossrefSearcher } = await import('./CrossrefSearcher.js');
+      const crossref = new CrossrefSearcher();
+      return await crossref.getReferences(paper.doi);
+    } catch (error) {
+      console.error('Error getting ScienceDirect references:', error);
+      return [];
+    }
   }
 }

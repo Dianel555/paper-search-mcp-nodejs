@@ -126,26 +126,32 @@ interface ScopusAbstractResponse {
 export class ScopusSearcher extends PaperSource {
   private client: AxiosInstance;
   private rateLimiter: RateLimiter;
+  private searchApiKey?: string;
+  private elsevierApiKey?: string;
 
-  constructor(apiKey?: string) {
+  constructor(apiKey?: string, searchApiKey?: string) {
     super('scopus', 'https://api.elsevier.com', apiKey);
+    
+    // Support two API keys: one for search, one for other operations
+    this.elsevierApiKey = apiKey || process.env.ELSEVIER_API_KEY;
+    this.searchApiKey = searchApiKey || process.env.SCOPUS_SEARCH_API_KEY || this.elsevierApiKey;
     
     this.client = axios.create({
       baseURL: 'https://api.elsevier.com',
       headers: {
         'Accept': 'application/json',
-        ...(apiKey ? { 'X-ELS-APIKey': apiKey } : {})
+        ...(this.searchApiKey ? { 'X-ELS-APIKey': this.searchApiKey } : {})
       }
     });
 
     // Scopus rate limits (same as Elsevier):
     // - Without key: 20 requests per minute  
     // - With key: 10 requests per second (600 per minute)
-    const requestsPerSecond = apiKey ? 10 : 0.33;
+    const requestsPerSecond = this.searchApiKey ? 10 : 0.33;
     
     this.rateLimiter = new RateLimiter({
       requestsPerSecond,
-      burstCapacity: apiKey ? 20 : 5
+      burstCapacity: this.searchApiKey ? 20 : 5
     });
   }
 
@@ -359,7 +365,7 @@ export class ScopusSearcher extends PaperSource {
   getCapabilities(): PlatformCapabilities {
     return {
       search: true,
-      download: false, // Requires institutional access
+      download: false,
       fullText: false,
       citations: true,
       requiresApiKey: true,
@@ -377,5 +383,113 @@ export class ScopusSearcher extends PaperSource {
       throw new Error('Paper not found');
     }
     return paper.abstract || 'Abstract not available';
+  }
+
+  /**
+   * 获取参考文献的Scopus ID列表
+   */
+  async getReferenceIds(scopusId: string): Promise<string[]> {
+    if (!this.elsevierApiKey) return [];
+
+    try {
+      await this.rateLimiter.waitForPermission();
+
+      const response = await axios.get(
+        `https://api.elsevier.com/content/abstract/scopus_id/${scopusId}`,
+        {
+          params: { view: 'REF' },
+          headers: {
+            'Accept': 'application/json',
+            'X-ELS-APIKey': this.elsevierApiKey
+          }
+        }
+      );
+
+      const refIds: string[] = [];
+      const coreData = response.data?.['abstracts-retrieval-response']?.item?.bibrecord;
+      const tail = coreData?.tail;
+      const bibliography = tail?.bibliography;
+      const references = bibliography?.reference || [];
+
+      for (const ref of references) {
+        const refInfo = ref?.['ref-info'];
+        const refScopusId = refInfo?.['refd-itemidlist']?.itemid?.['#text'];
+        if (refScopusId) {
+          refIds.push(refScopusId);
+        }
+      }
+
+      return refIds;
+    } catch (error) {
+      console.error(`Error getting reference IDs for Scopus ID ${scopusId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * 获取引用文献的Scopus ID列表
+   */
+  async getCitationIds(scopusId: string): Promise<string[]> {
+    if (!this.elsevierApiKey) return [];
+
+    try {
+      await this.rateLimiter.waitForPermission();
+
+      const response = await axios.get(
+        'https://api.elsevier.com/content/abstract/citations',
+        {
+          params: { scopus_id: scopusId },
+          headers: {
+            'Accept': 'application/json',
+            'X-ELS-APIKey': this.elsevierApiKey
+          }
+        }
+      );
+
+      const citIds: string[] = [];
+      const citationData = response.data?.['abstract-citations-response'];
+      const citeInfoMatrix = citationData?.citeInfoMatrix;
+      const citeInfo = citeInfoMatrix?.citeInfo || [];
+
+      for (const cite of citeInfo) {
+        const citeScopusId = cite?.['scopus-id'];
+        if (citeScopusId) {
+          citIds.push(citeScopusId);
+        }
+      }
+
+      return citIds;
+    } catch (error) {
+      console.error(`Error getting citation IDs for Scopus ID ${scopusId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * 获取论文详情（包含references和citations ID列表）
+   */
+  async getPaperWithCitations(paperId: string): Promise<Paper | null> {
+    try {
+      const paper = await this.getAbstract(paperId);
+      if (!paper) return null;
+
+      const scopusId = paper.extra?.scopusId?.replace('SCOPUS_ID:', '') || paperId;
+      
+      const [refIds, citIds] = await Promise.all([
+        this.getReferenceIds(scopusId),
+        this.getCitationIds(scopusId)
+      ]);
+
+      paper.references = refIds;
+      paper.extra = {
+        ...paper.extra,
+        citationIds: citIds
+      };
+
+      return paper;
+    } catch (error) {
+      console.error('Error getting paper with citations:', error);
+      return null;
+    }
   }
 }

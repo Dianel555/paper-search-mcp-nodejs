@@ -2,16 +2,17 @@
 
 ## English|[中文](README-sc.md)
 
-A Node.js Model Context Protocol (MCP) server for searching and downloading academic papers from multiple sources, including arXiv, Web of Science, PubMed, Google Scholar, Sci-Hub, ScienceDirect, Springer, Wiley, Scopus, and **13 academic platforms** in total.
+A Node.js Model Context Protocol (MCP) server for searching and downloading academic papers from multiple sources, including arXiv, Web of Science, PubMed, Google Scholar, Sci-Hub, ScienceDirect, Springer, Wiley, Scopus, Crossref, and **14 academic platforms** in total.
 
 ![Node.js](https://img.shields.io/badge/node.js->=18.0.0-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platforms](https://img.shields.io/badge/platforms-13-brightgreen.svg)
+![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)
 
 ## ✨ Key Features
 
-- **🌍 13 Academic Platforms**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus
+- **🌍 14 Academic Platforms**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus, Crossref
 - **🔗 MCP Protocol Integration**: Seamless integration with Claude Desktop and other AI assistants
 - **📊 Unified Data Model**: Standardized paper format across all platforms
 - **⚡ High-Performance Search**: Concurrent search with intelligent rate limiting
@@ -23,8 +24,9 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 
 | Platform | Search | Download | Full Text | Citations | API Key | Special Features |
 |----------|--------|----------|-----------|-----------|---------|------------------|
+| **Crossref** | ✅ | ❌ | ❌ | ✅ | ❌ | Default search, extensive metadata coverage |
 | **arXiv** | ✅ | ✅ | ✅ | ❌ | ❌ | Physics/CS preprints |
-| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ Required | High-quality journal index |
+| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ Required | Multi-topic search, date sorting, year ranges |
 | **PubMed** | ✅ | ❌ | ❌ | ❌ | 🟡 Optional | Biomedical literature |
 | **Google Scholar** | ✅ | ❌ | ❌ | ✅ | ❌ | Comprehensive academic search |
 | **bioRxiv** | ✅ | ✅ | ✅ | ❌ | ❌ | Biology preprints |
@@ -34,10 +36,12 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 | **Sci-Hub** | ✅ | ✅ | ❌ | ❌ | ❌ | Universal paper access via DOI |
 | **ScienceDirect** | ✅ | ❌ | ❌ | ✅ | ✅ Required | Elsevier's full-text database |
 | **Springer Nature** | ✅ | ✅* | ❌ | ❌ | ✅ Required | Dual API: Meta v2 & OpenAccess |
-| **Wiley** | ✅ | ✅ | ❌ | ❌ | ✅ Required | Text and Data Mining API |
+| **Wiley** | ❌ | ✅ | ✅ | ❌ | ✅ Required | TDM API: DOI-based PDF download only |
 | **Scopus** | ✅ | ❌ | ❌ | ✅ | ✅ Required | Largest citation database |
 
 ✅ Supported | ❌ Not supported | 🟡 Optional | ✅* Open Access only
+
+> **Note**: Wiley TDM API does not support keyword search. Use `search_crossref` to find Wiley articles, then use `download_paper` with `platform="wiley"` to download PDFs by DOI.
 
 ## 🚀 Quick Start
 
@@ -181,9 +185,26 @@ search_papers({
 ```
 
 **Platform Selection Behavior:**
+- `platform: "crossref"` (default) - Free API with extensive scholarly metadata coverage
 - `platform: "all"` - Randomly selects one platform for efficient, focused results
 - Specific platform - Searches only that platform
-- Available platforms: `arxiv`, `webofscience`/`wos`, `pubmed`, `biorxiv`, `medrxiv`, `semantic`, `iacr`, `googlescholar`/`scholar`, `scihub`, `sciencedirect`, `springer`, `wiley`, `scopus`
+- Available platforms: `crossref`, `arxiv`, `webofscience`/`wos`, `pubmed`, `biorxiv`, `medrxiv`, `semantic`, `iacr`, `googlescholar`/`scholar`, `scihub`, `sciencedirect`, `springer`, `scopus`
+- Note: `wiley` only supports PDF download by DOI, not keyword search
+
+### `search_crossref`
+Search academic papers from Crossref database (default search platform)
+
+```typescript
+search_crossref({
+  query: "machine learning",
+  maxResults: 10,
+  year: "2023",
+  author: "Smith",
+  sortBy: "relevance",  // or "date", "citations"
+  sortOrder: "desc"
+})
+```
+
 ### `search_arxiv`
 Search arXiv preprints specifically
 
@@ -192,7 +213,10 @@ search_arxiv({
   query: "transformer neural networks",
   maxResults: 10,
   category: "cs.AI",
-  author: "Attention"
+  author: "Vaswani",
+  year: "2023",
+  sortBy: "date",      // relevance, date, citations
+  sortOrder: "desc"    // asc, desc
 })
 ```
 
@@ -218,7 +242,8 @@ search_pubmed({
   year: "2023",
   author: "Smith",
   journal: "New England Journal of Medicine",
-  publicationType: ["Journal Article", "Clinical Trial"]
+  publicationType: ["Journal Article", "Clinical Trial"],
+  sortBy: "date"       // relevance, date
 })
 ```
 
@@ -242,7 +267,15 @@ Search biology and medical preprints
 search_biorxiv({
   query: "CRISPR",
   maxResults: 15,
-  days: 30
+  days: 30,
+  category: "genomics"  // neuroscience, genomics, etc.
+})
+
+search_medrxiv({
+  query: "COVID-19",
+  maxResults: 10,
+  days: 30,
+  category: "infectious_diseases"
 })
 ```
 
@@ -277,6 +310,45 @@ search_scihub({
   doiOrUrl: "10.1038/nature12373",
   downloadPdf: true,
   savePath: "./downloads"
+})
+```
+
+### `search_sciencedirect`
+Search Elsevier ScienceDirect database
+
+```typescript
+search_sciencedirect({
+  query: "artificial intelligence",
+  maxResults: 10,
+  year: "2023",
+  author: "Smith",
+  openAccess: true  // Filter for open access articles
+})
+```
+
+### `search_springer`
+Search Springer Nature database (Metadata API v2 or OpenAccess API)
+
+```typescript
+search_springer({
+  query: "machine learning",
+  maxResults: 10,
+  year: "2023",
+  openAccess: true,  // Use OpenAccess API for downloadable PDFs
+  type: "Journal"    // Filter: Journal, Book, or Chapter
+})
+```
+
+### `search_scopus`
+Search Scopus citation database
+
+```typescript
+search_scopus({
+  query: "renewable energy",
+  maxResults: 10,
+  year: "2023",
+  affiliation: "MIT",
+  documentType: "ar"  // ar=article, cp=conference, re=review
 })
 ```
 
@@ -356,13 +428,14 @@ src/
 │   ├── PubMedSearcher.ts     # PubMed searcher
 │   ├── GoogleScholarSearcher.ts # Google Scholar searcher
 │   ├── BioRxivSearcher.ts    # bioRxiv/medRxiv searcher
-|   ├── SemanticScholarSearcher.ts # Semantic Scholar searcher
-|   ├── IACRSearcher.ts       # IACR ePrint searcher
-|   ├── SciHubSearcher.ts     # Sci-Hub searcher with mirror management
-|   ├── ScienceDirectSearcher.ts # ScienceDirect (Elsevier) searcher
+│   ├── SemanticScholarSearcher.ts # Semantic Scholar searcher
+│   ├── IACRSearcher.ts       # IACR ePrint searcher
+│   ├── SciHubSearcher.ts     # Sci-Hub searcher with mirror management
+│   ├── ScienceDirectSearcher.ts # ScienceDirect (Elsevier) searcher
 │   ├── SpringerSearcher.ts   # Springer Nature searcher (Meta v2 & OpenAccess APIs)
-|   ├── WileySearcher.ts      # Wiley TDM API searcher
-|   └── ScopusSearcher.ts     # Scopus citation database searcher
+│   ├── WileySearcher.ts      # Wiley TDM API (DOI-based PDF download only)
+│   ├── ScopusSearcher.ts     # Scopus citation database searcher
+│   └── CrossrefSearcher.ts   # Crossref API searcher (default platform)
 ├── utils/
 │   └── RateLimiter.ts        # Token bucket rate limiter
 └── server.ts                 # MCP server main file
@@ -422,33 +495,77 @@ search_springer({
 
 ### Web of Science Advanced Search
 
+🎯 **Recently Fixed (v0.2.2)**: Multi-topic search, date sorting, and year range filtering now work correctly!
+
 ```typescript
-// Use Web of Science query syntax
+// Multi-topic search (FIXED in v0.2.2)
+search_webofscience({
+  query: 'oriented structure',
+  year: '2023-2025',
+  sortBy: 'date',
+  sortOrder: 'desc',
+  maxResults: 10
+})
+
+// Year range filtering (NEW in v0.2.2)
+search_webofscience({
+  query: 'machine learning',
+  year: '2020-2024',  // Now supports range format
+  sortBy: 'citations',
+  sortOrder: 'desc'
+})
+
+// Advanced query with filters
+search_webofscience({
+  query: 'blockchain',
+  author: 'zhang',
+  journal: 'Nature',
+  year: '2023',
+  sortBy: 'date',
+  sortOrder: 'desc'
+})
+
+// Traditional WOS query syntax still supported
 search_webofscience({
   query: 'TS="machine learning" AND PY=2023',
   maxResults: 20
 })
-
-// Author search
-search_webofscience({
-  query: 'AU="Smith, J*"',
-  maxResults: 10
-})
-
-// Journal search
-search_webofscience({
-  query: 'SO="Nature" AND PY=2022-2023',
-  maxResults: 15
-})
 ```
 
-**Supported Fields:**
+**🔧 v0.2.2 Improvements:**
+
+- ✅ **Multi-topic Search**: Complex keywords like "oriented structure" now work correctly
+- ✅ **Date Sorting**: Fixed API parameter mapping for proper date sorting
+- ✅ **Sort Order**: Added support for ascending/descending sort order
+- ✅ **Year Ranges**: Support for year ranges like "2020-2023"
+- ✅ **Query Escaping**: Proper handling of special characters in search terms
+
+**Supported Search Options:**
+- `query`: Search terms (supports multi-topic)
+- `year`: Single year "2023" or range "2020-2023"
+- `author`: Author name filtering
+- `journal`: Journal/source filtering
+- `sortBy`: Sort field (`date`, `citations`, `relevance`, `title`, `author`, `journal`)
+- `sortOrder`: Sort direction (`asc`, `desc`)
+- `maxResults`: Maximum results (1-100)
+
+**Supported WOS Fields:**
 - `TS`: Topic search
 - `AU`: Author
 - `SO`: Source journal
 - `PY`: Publication year
 - `DO`: DOI
 - `TI`: Title
+
+**🔧 Debugging WOS Issues:**
+```bash
+# Enable verbose WOS API logging
+export WOS_VERBOSE_LOGGING=true
+# Or set in .env file: WOS_VERBOSE_LOGGING=true
+
+# Enable development mode for additional debug info
+export NODE_ENV=development
+```
 
 ### Google Scholar Features
 
