@@ -7,6 +7,7 @@ import axios, { AxiosResponse } from 'axios';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { escapeQueryValue, validateQueryComplexity, withTimeout } from '../utils/SecurityUtils.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug, logWarn } from '../utils/Logger.js';
 
@@ -77,6 +78,7 @@ interface WoSRecord {
   /** 被引次数 */
   citations?: Array<{
     citingArticlesCount?: number;
+    count?: number;
   }>;
 }
 
@@ -85,6 +87,10 @@ export class WebOfScienceSearcher extends PaperSource {
   private apiVersion: string;
   private fallbackAttempted: boolean = false;
   private readonly preferredVersion: string;
+  private readonly rateLimiter: RateLimiter;
+  private readonly dailyLimit: number;
+  private dailyCount: number;
+  private dailyKey: string;
 
   constructor(apiKey?: string, apiVersion?: string) {
     super('webofscience', 'https://api.clarivate.com/apis', apiKey);
@@ -92,6 +98,21 @@ export class WebOfScienceSearcher extends PaperSource {
     this.preferredVersion = apiVersion || process.env.WOS_API_VERSION || 'v2';
     this.apiVersion = this.preferredVersion;
     this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
+
+    const rpsEnv = Number(process.env.WOS_RPS);
+    const requestsPerSecond = Number.isFinite(rpsEnv) && rpsEnv > 0 ? rpsEnv : 5;
+    const burstEnv = Number(process.env.WOS_BURST);
+    const burstCapacity = Number.isFinite(burstEnv) && burstEnv > 0 ? burstEnv : requestsPerSecond;
+    this.rateLimiter = new RateLimiter({
+      requestsPerSecond,
+      burstCapacity,
+      debug: process.env.NODE_ENV === 'development'
+    });
+
+    const dailyLimitEnv = Number(process.env.WOS_DAILY_LIMIT);
+    this.dailyLimit = Number.isFinite(dailyLimitEnv) && dailyLimitEnv > 0 ? dailyLimitEnv : 5000;
+    this.dailyKey = this.getLocalDayKey();
+    this.dailyCount = 0;
     
     logDebug(`WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
   }
@@ -307,12 +328,8 @@ export class WebOfScienceSearcher extends PaperSource {
     // 添加排序参数 - 使用正确的API参数名
     if (options.sortBy) {
       const sortField = this.mapSortField(options.sortBy);
-      params.sortField = sortField; // WoS API使用sortField参数
-
-      // 添加排序顺序
-      if (options.sortOrder) {
-        params.sortOrder = options.sortOrder.toUpperCase(); // API要求大写: ASC 或 DESC
-      }
+      const direction = (options.sortOrder || 'DESC').toUpperCase();
+      params.sortField = `${sortField} ${direction}`; // v1/v2 expect "TAG DIRECTION"
     }
 
     return params;
@@ -478,7 +495,10 @@ export class WebOfScienceSearcher extends PaperSource {
       const doi = record.identifiers?.doi || '';
       
       // 提取被引次数
-      const citationCount = record.citations?.[0]?.citingArticlesCount || 0;
+      const citationCount =
+        record.citations?.[0]?.citingArticlesCount ??
+        record.citations?.[0]?.count ??
+        0;
       
       // 提取关键词
       const keywords = record.keywords?.authorKeywords || [];
@@ -517,6 +537,31 @@ export class WebOfScienceSearcher extends PaperSource {
     }
   }
 
+  private getLocalDayKey(date: Date = new Date()): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private resetDailyQuotaIfNeeded(): void {
+    const currentKey = this.getLocalDayKey();
+    if (currentKey !== this.dailyKey) {
+      this.dailyKey = currentKey;
+      this.dailyCount = 0;
+    }
+  }
+
+  private countDailyRequestOrThrow(): void {
+    if (this.dailyLimit <= 0) {
+      return;
+    }
+    if (this.dailyCount >= this.dailyLimit) {
+      throw new Error(`Web of Science daily quota reached (${this.dailyLimit}/day).`);
+    }
+    this.dailyCount += 1;
+  }
+
   /**
    * 提取页码信息
    */
@@ -539,6 +584,9 @@ export class WebOfScienceSearcher extends PaperSource {
    * 发起API请求 - 支持自动版本降级
    */
   private async makeApiRequest(endpoint: string, config: any, isRetry: boolean = false): Promise<AxiosResponse> {
+    await this.rateLimiter.waitForPermission();
+    this.resetDailyQuotaIfNeeded();
+    this.countDailyRequestOrThrow();
     const url = `${this.apiUrl}${endpoint}`;
     
     const requestConfig = {
