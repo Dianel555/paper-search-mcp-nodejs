@@ -78,6 +78,7 @@ interface WoSRecord {
   /** 被引次数 */
   citations?: Array<{
     citingArticlesCount?: number;
+    count?: number;
   }>;
 }
 
@@ -327,12 +328,8 @@ export class WebOfScienceSearcher extends PaperSource {
     // 添加排序参数 - 使用正确的API参数名
     if (options.sortBy) {
       const sortField = this.mapSortField(options.sortBy);
-      params.sortField = sortField; // WoS API使用sortField参数
-
-      // 添加排序顺序
-      if (options.sortOrder) {
-        params.sortOrder = options.sortOrder.toUpperCase(); // API要求大写: ASC 或 DESC
-      }
+      const direction = (options.sortOrder || 'DESC').toUpperCase();
+      params.sortField = `${sortField} ${direction}`; // v1/v2 expect "TAG DIRECTION"
     }
 
     return params;
@@ -498,7 +495,10 @@ export class WebOfScienceSearcher extends PaperSource {
       const doi = record.identifiers?.doi || '';
       
       // 提取被引次数
-      const citationCount = record.citations?.[0]?.citingArticlesCount || 0;
+      const citationCount =
+        record.citations?.[0]?.citingArticlesCount ??
+        record.citations?.[0]?.count ??
+        0;
       
       // 提取关键词
       const keywords = record.keywords?.authorKeywords || [];
