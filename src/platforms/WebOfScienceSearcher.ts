@@ -7,6 +7,7 @@ import axios, { AxiosResponse } from 'axios';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { escapeQueryValue, validateQueryComplexity, withTimeout } from '../utils/SecurityUtils.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug, logWarn } from '../utils/Logger.js';
 
@@ -85,6 +86,7 @@ export class WebOfScienceSearcher extends PaperSource {
   private apiVersion: string;
   private fallbackAttempted: boolean = false;
   private readonly preferredVersion: string;
+  private readonly rateLimiter: RateLimiter;
 
   constructor(apiKey?: string, apiVersion?: string) {
     super('webofscience', 'https://api.clarivate.com/apis', apiKey);
@@ -92,6 +94,16 @@ export class WebOfScienceSearcher extends PaperSource {
     this.preferredVersion = apiVersion || process.env.WOS_API_VERSION || 'v2';
     this.apiVersion = this.preferredVersion;
     this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
+
+    const rpsEnv = Number(process.env.WOS_RPS);
+    const requestsPerSecond = Number.isFinite(rpsEnv) && rpsEnv > 0 ? rpsEnv : 5;
+    const burstEnv = Number(process.env.WOS_BURST);
+    const burstCapacity = Number.isFinite(burstEnv) && burstEnv > 0 ? burstEnv : requestsPerSecond;
+    this.rateLimiter = new RateLimiter({
+      requestsPerSecond,
+      burstCapacity,
+      debug: process.env.NODE_ENV === 'development'
+    });
     
     logDebug(`WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
   }
@@ -539,6 +551,7 @@ export class WebOfScienceSearcher extends PaperSource {
    * 发起API请求 - 支持自动版本降级
    */
   private async makeApiRequest(endpoint: string, config: any, isRetry: boolean = false): Promise<AxiosResponse> {
+    await this.rateLimiter.waitForPermission();
     const url = `${this.apiUrl}${endpoint}`;
     
     const requestConfig = {
