@@ -87,6 +87,9 @@ export class WebOfScienceSearcher extends PaperSource {
   private fallbackAttempted: boolean = false;
   private readonly preferredVersion: string;
   private readonly rateLimiter: RateLimiter;
+  private readonly dailyLimit: number;
+  private dailyCount: number;
+  private dailyKey: string;
 
   constructor(apiKey?: string, apiVersion?: string) {
     super('webofscience', 'https://api.clarivate.com/apis', apiKey);
@@ -104,6 +107,11 @@ export class WebOfScienceSearcher extends PaperSource {
       burstCapacity,
       debug: process.env.NODE_ENV === 'development'
     });
+
+    const dailyLimitEnv = Number(process.env.WOS_DAILY_LIMIT);
+    this.dailyLimit = Number.isFinite(dailyLimitEnv) && dailyLimitEnv > 0 ? dailyLimitEnv : 5000;
+    this.dailyKey = this.getLocalDayKey();
+    this.dailyCount = 0;
     
     logDebug(`WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
   }
@@ -529,6 +537,31 @@ export class WebOfScienceSearcher extends PaperSource {
     }
   }
 
+  private getLocalDayKey(date: Date = new Date()): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private resetDailyQuotaIfNeeded(): void {
+    const currentKey = this.getLocalDayKey();
+    if (currentKey !== this.dailyKey) {
+      this.dailyKey = currentKey;
+      this.dailyCount = 0;
+    }
+  }
+
+  private countDailyRequestOrThrow(): void {
+    if (this.dailyLimit <= 0) {
+      return;
+    }
+    if (this.dailyCount >= this.dailyLimit) {
+      throw new Error(`Web of Science daily quota reached (${this.dailyLimit}/day).`);
+    }
+    this.dailyCount += 1;
+  }
+
   /**
    * 提取页码信息
    */
@@ -552,6 +585,8 @@ export class WebOfScienceSearcher extends PaperSource {
    */
   private async makeApiRequest(endpoint: string, config: any, isRetry: boolean = false): Promise<AxiosResponse> {
     await this.rateLimiter.waitForPermission();
+    this.resetDailyQuotaIfNeeded();
+    this.countDailyRequestOrThrow();
     const url = `${this.apiUrl}${endpoint}`;
     
     const requestConfig = {
