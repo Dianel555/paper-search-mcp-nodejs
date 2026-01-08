@@ -9,7 +9,7 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
 ![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)
-
+[![MCP Badge](https://lobehub.com/badge/mcp/dianel555-paper-search-nodejs)](https://lobehub.com/mcp/dianel555-paper-search-nodejs)
 ## ✨ Key Features
 
 - **🌍 14 Academic Platforms**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus, Crossref
