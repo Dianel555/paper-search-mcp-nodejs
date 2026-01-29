@@ -11,6 +11,9 @@ import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
+import { RequestCache } from '../utils/RequestCache.js';
 
 interface ArxivEntry {
   id: string[];
@@ -39,8 +42,20 @@ interface ArxivResponse {
 }
 
 export class ArxivSearcher extends PaperSource {
+  private readonly rateLimiter: RateLimiter;
+  private readonly cache: RequestCache<Paper[]>;
+
   constructor() {
     super('arxiv', 'https://export.arxiv.org/api');
+    // arXiv rate limit: 1 request per 3 seconds (0.33 req/s)
+    this.rateLimiter = new RateLimiter({
+      requestsPerSecond: 0.33,
+      burstCapacity: 1
+    });
+    this.cache = new RequestCache<Paper[]>({
+      maxSize: 100,
+      ttlMs: 3600000 // 1 hour
+    });
   }
 
   getCapabilities(): PlatformCapabilities {
@@ -59,9 +74,21 @@ export class ArxivSearcher extends PaperSource {
    */
   async search(query: string, options: SearchOptions = {}): Promise<Paper[]> {
     try {
+      const customOptions = options as any;
+      const forceRefresh = customOptions.forceRefresh === true;
+
+      // Check cache first
+      if (!forceRefresh) {
+        const cacheKey = this.cache.generateKey('arxiv', query, options);
+        const cached = this.cache.get(cacheKey);
+        if (cached) {
+          return cached;
+        }
+      }
+
       const searchQuery = this.buildSearchQuery(query, options);
       const url = `${this.baseUrl}/query`;
-      
+
       // Map sortOrder: arXiv API requires 'ascending' or 'descending'
       const sortOrderMap: Record<string, string> = {
         'asc': 'ascending',
@@ -69,7 +96,7 @@ export class ArxivSearcher extends PaperSource {
         'ascending': 'ascending',
         'descending': 'descending'
       };
-      
+
       const params = {
         search_query: searchQuery,
         max_results: options.maxResults || 10,
@@ -80,19 +107,26 @@ export class ArxivSearcher extends PaperSource {
       logDebug(`arXiv API Request: GET ${url}`);
       logDebug('arXiv Request params:', params);
 
-      const response = await axios.get(url, { 
-        params, 
-        timeout: TIMEOUTS.DEFAULT,
-        headers: {
-          'User-Agent': USER_AGENT
-        }
-      });
-      
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(url, {
+          params,
+          timeout: TIMEOUTS.DEFAULT,
+          headers: { 'User-Agent': USER_AGENT }
+        }),
+        { context: 'arXiv search' }
+      );
+
       logDebug(`arXiv API Response: ${response.status} ${response.statusText}, Data length: ${response.data?.length || 0}`);
-      
+
       const papers = await this.parseSearchResponse(response.data);
       logDebug(`arXiv Parsed ${papers.length} papers`);
-      
+
+      // Cache results
+      const cacheKey = this.cache.generateKey('arxiv', query, options);
+      this.cache.set(cacheKey, papers);
+
       return papers;
     } catch (error: any) {
       logDebug('arXiv Search Error:', error.message);
@@ -121,10 +155,15 @@ export class ArxivSearcher extends PaperSource {
         return filePath;
       }
 
-      const response = await axios.get(pdfUrl, {
-        responseType: 'stream',
-        timeout: TIMEOUTS.DOWNLOAD
-      });
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(pdfUrl, {
+          responseType: 'stream',
+          timeout: TIMEOUTS.DOWNLOAD
+        }),
+        { context: 'arXiv download' }
+      );
 
       const writer = fs.createWriteStream(filePath);
       response.data.pipe(writer);

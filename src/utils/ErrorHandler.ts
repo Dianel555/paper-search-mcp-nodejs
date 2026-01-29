@@ -4,7 +4,7 @@
  */
 
 import { sanitizeRequest, maskSensitiveData } from './SecurityUtils.js';
-import { logError as loggerError } from './Logger.js';
+import { logError as loggerError, logDebug } from './Logger.js';
 
 /**
  * API Error codes and their meanings
@@ -243,7 +243,7 @@ export class ErrorHandler {
    */
   static getRetryDelay(error: any, attempt: number = 1): number {
     const status = error.response?.status || error.status;
-    
+
     // For rate limiting, check Retry-After header
     if (status === 429) {
       const retryAfter = error.response?.headers?.['retry-after'];
@@ -264,6 +264,50 @@ export class ErrorHandler {
 
     // Default delay
     return 1000 * attempt;
+  }
+
+  /**
+   * Retry a function with exponential backoff and full jitter
+   */
+  static async retryWithBackoff<T>(
+    fn: () => Promise<T>,
+    options: {
+      maxRetries?: number;
+      initialDelayMs?: number;
+      maxDelayMs?: number;
+      context?: string;
+    } = {}
+  ): Promise<T> {
+    const {
+      maxRetries = 3,
+      initialDelayMs = 1000,
+      maxDelayMs = 30000,
+      context = 'operation'
+    } = options;
+
+    let lastError: any;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        lastError = error;
+
+        if (attempt >= maxRetries || !ErrorHandler.isRetryable(error)) {
+          throw error;
+        }
+
+        // Exponential backoff with full jitter
+        const baseDelay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt));
+        const jitteredDelay = Math.floor(Math.random() * baseDelay);
+
+        logDebug(`[Retry] ${context} attempt ${attempt + 1}/${maxRetries} failed, retrying in ${jitteredDelay}ms`);
+
+        await new Promise(resolve => setTimeout(resolve, jitteredDelay));
+      }
+    }
+
+    throw lastError;
   }
 }
 

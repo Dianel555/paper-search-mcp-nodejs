@@ -16,6 +16,8 @@ import axios, { AxiosInstance } from 'axios';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
+import { QuotaManager } from '../utils/QuotaManager.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
 
@@ -128,16 +130,17 @@ interface ScopusAbstractResponse {
 export class ScopusSearcher extends PaperSource {
   private client: AxiosInstance;
   private rateLimiter: RateLimiter;
+  private quotaManager: QuotaManager;
   private searchApiKey?: string;
   private elsevierApiKey?: string;
 
   constructor(apiKey?: string, searchApiKey?: string) {
     super('scopus', 'https://api.elsevier.com', apiKey);
-    
+
     // Support two API keys: one for search, one for other operations
     this.elsevierApiKey = apiKey || process.env.ELSEVIER_API_KEY;
     this.searchApiKey = searchApiKey || process.env.SCOPUS_SEARCH_API_KEY || this.elsevierApiKey;
-    
+
     this.client = axios.create({
       baseURL: 'https://api.elsevier.com',
       timeout: TIMEOUTS.DEFAULT,
@@ -149,13 +152,19 @@ export class ScopusSearcher extends PaperSource {
     });
 
     // Scopus rate limits (same as Elsevier):
-    // - Without key: 20 requests per minute  
+    // - Without key: 20 requests per minute
     // - With key: 10 requests per second (600 per minute)
     const requestsPerSecond = this.searchApiKey ? 10 : 0.33;
-    
+
     this.rateLimiter = new RateLimiter({
       requestsPerSecond,
       burstCapacity: this.searchApiKey ? 20 : 5
+    });
+
+    this.quotaManager = QuotaManager.getInstance();
+    this.quotaManager.registerPlatform('scopus', {
+      dailyLimit: 5000,
+      envPrefix: 'SCOPUS'
     });
   }
 
@@ -216,16 +225,22 @@ export class ScopusSearcher extends PaperSource {
       }
 
       await this.rateLimiter.waitForPermission();
+      this.quotaManager.checkQuota('scopus');
 
-      const response = await this.client.get<ScopusSearchResponse>('/content/search/scopus', {
-        params: {
-          query: searchQuery,
-          count: maxResults,
-          start: 0,
-          view: 'COMPLETE',
-          field: 'dc:identifier,dc:title,dc:creator,prism:publicationName,prism:coverDate,prism:doi,prism:url,prism:volume,prism:issueIdentifier,prism:pageRange,citedby-count,dc:description,authkeywords,author,affiliation,openaccess,eid'
-        }
-      });
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.get<ScopusSearchResponse>('/content/search/scopus', {
+          params: {
+            query: searchQuery,
+            count: maxResults,
+            start: 0,
+            view: 'COMPLETE',
+            field: 'dc:identifier,dc:title,dc:creator,prism:publicationName,prism:coverDate,prism:doi,prism:url,prism:volume,prism:issueIdentifier,prism:pageRange,citedby-count,dc:description,authkeywords,author,affiliation,openaccess,eid'
+          }
+        }),
+        { context: 'Scopus search' }
+      );
+
+      this.quotaManager.incrementUsage('scopus');
 
       const entries = response.data['search-results']?.entry || [];
 
@@ -304,11 +319,12 @@ export class ScopusSearcher extends PaperSource {
     try {
       await this.rateLimiter.waitForPermission();
 
-      const response = await this.client.get<ScopusAbstractResponse>(`/content/abstract/scopus_id/${scopusId}`, {
-        params: {
-          view: 'FULL'
-        }
-      });
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.get<ScopusAbstractResponse>(`/content/abstract/scopus_id/${scopusId}`, {
+          params: { view: 'FULL' }
+        }),
+        { context: 'Scopus abstract' }
+      );
 
       const coredata = response.data['abstracts-retrieval-response']?.coredata;
       if (!coredata) return null;
@@ -391,15 +407,18 @@ export class ScopusSearcher extends PaperSource {
     try {
       await this.rateLimiter.waitForPermission();
 
-      const response = await axios.get(
-        `https://api.elsevier.com/content/abstract/scopus_id/${scopusId}`,
-        {
-          params: { view: 'REF' },
-          headers: {
-            'Accept': 'application/json',
-            'X-ELS-APIKey': this.elsevierApiKey
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(
+          `https://api.elsevier.com/content/abstract/scopus_id/${scopusId}`,
+          {
+            params: { view: 'REF' },
+            headers: {
+              'Accept': 'application/json',
+              'X-ELS-APIKey': this.elsevierApiKey
+            }
           }
-        }
+        ),
+        { context: 'Scopus references' }
       );
 
       const refIds: string[] = [];
@@ -432,15 +451,18 @@ export class ScopusSearcher extends PaperSource {
     try {
       await this.rateLimiter.waitForPermission();
 
-      const response = await axios.get(
-        'https://api.elsevier.com/content/abstract/citations',
-        {
-          params: { scopus_id: scopusId },
-          headers: {
-            'Accept': 'application/json',
-            'X-ELS-APIKey': this.elsevierApiKey
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(
+          'https://api.elsevier.com/content/abstract/citations',
+          {
+            params: { scopus_id: scopusId },
+            headers: {
+              'Accept': 'application/json',
+              'X-ELS-APIKey': this.elsevierApiKey
+            }
           }
-        }
+        ),
+        { context: 'Scopus citations' }
       );
 
       const citIds: string[] = [];

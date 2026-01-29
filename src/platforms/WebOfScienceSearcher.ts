@@ -8,6 +8,8 @@ import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { escapeQueryValue, validateQueryComplexity, withTimeout } from '../utils/SecurityUtils.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
+import { QuotaManager } from '../utils/QuotaManager.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug, logWarn } from '../utils/Logger.js';
 
@@ -88,9 +90,7 @@ export class WebOfScienceSearcher extends PaperSource {
   private fallbackAttempted: boolean = false;
   private readonly preferredVersion: string;
   private readonly rateLimiter: RateLimiter;
-  private readonly dailyLimit: number;
-  private dailyCount: number;
-  private dailyKey: string;
+  private readonly quotaManager: QuotaManager;
 
   constructor(apiKey?: string, apiVersion?: string) {
     super('webofscience', 'https://api.clarivate.com/apis', apiKey);
@@ -109,11 +109,12 @@ export class WebOfScienceSearcher extends PaperSource {
       debug: process.env.NODE_ENV === 'development'
     });
 
-    const dailyLimitEnv = Number(process.env.WOS_DAILY_LIMIT);
-    this.dailyLimit = Number.isFinite(dailyLimitEnv) && dailyLimitEnv > 0 ? dailyLimitEnv : 5000;
-    this.dailyKey = this.getLocalDayKey();
-    this.dailyCount = 0;
-    
+    this.quotaManager = QuotaManager.getInstance();
+    this.quotaManager.registerPlatform('webofscience', {
+      dailyLimit: 5000,
+      envPrefix: 'WOS'
+    });
+
     logDebug(`WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
   }
 
@@ -537,58 +538,15 @@ export class WebOfScienceSearcher extends PaperSource {
     }
   }
 
-  private getLocalDayKey(date: Date = new Date()): string {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
-  private resetDailyQuotaIfNeeded(): void {
-    const currentKey = this.getLocalDayKey();
-    if (currentKey !== this.dailyKey) {
-      this.dailyKey = currentKey;
-      this.dailyCount = 0;
-    }
-  }
-
-  private countDailyRequestOrThrow(): void {
-    if (this.dailyLimit <= 0) {
-      return;
-    }
-    if (this.dailyCount >= this.dailyLimit) {
-      throw new Error(`Web of Science daily quota reached (${this.dailyLimit}/day).`);
-    }
-    this.dailyCount += 1;
-  }
-
-  /**
-   * 提取页码信息
-   */
-  private extractPages(pubInfo: any): string | undefined {
-    if (!pubInfo?.page) return undefined;
-    
-    const beginPage = pubInfo.page['@begin'];
-    const endPage = pubInfo.page['@end'];
-    
-    if (beginPage && endPage) {
-      return `${beginPage}-${endPage}`;
-    } else if (beginPage) {
-      return beginPage;
-    }
-    
-    return undefined;
-  }
-
   /**
    * 发起API请求 - 支持自动版本降级
    */
   private async makeApiRequest(endpoint: string, config: any, isRetry: boolean = false): Promise<AxiosResponse> {
     await this.rateLimiter.waitForPermission();
-    this.resetDailyQuotaIfNeeded();
-    this.countDailyRequestOrThrow();
+    this.quotaManager.checkQuota('webofscience');
+
     const url = `${this.apiUrl}${endpoint}`;
-    
+
     const requestConfig = {
       ...config,
       headers: {
@@ -605,9 +563,15 @@ export class WebOfScienceSearcher extends PaperSource {
       logDebug(`WoS API Request: ${config.method} ${url} (version: ${this.apiVersion})`);
       logDebug('WoS Request params:', config.params);
     }
-    
+
     try {
-      const response = await axios(url, requestConfig);
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios(url, requestConfig),
+        { context: 'Web of Science API' }
+      );
+
+      this.quotaManager.incrementUsage('webofscience');
+
       if (process.env.NODE_ENV === 'development') {
         logDebug(`WoS API Response: ${response.status} ${response.statusText}`);
         logDebug('WoS Response data preview:', JSON.stringify(response.data, null, 2).substring(0, 500));
@@ -617,7 +581,7 @@ export class WebOfScienceSearcher extends PaperSource {
       return response;
     } catch (error: any) {
       const status = error.response?.status;
-      
+
       if (process.env.NODE_ENV === 'development') {
         logDebug(`WoS API Error (${this.apiVersion}):`, {
           status,

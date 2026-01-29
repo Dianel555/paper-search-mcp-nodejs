@@ -113,6 +113,12 @@ profile-*
 .claude/
 claudedocs/
 
+#openspec
+openspec/
+
+.ace-tool/
+.serena/
+
 # Downloads directory (for PDF files)
 downloads/
 *.pdf
@@ -140,3 +146,4 @@ WARP.md
 # Academic search results cache
 cache/
 *.cache
+.ace-tool/

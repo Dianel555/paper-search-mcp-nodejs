@@ -8,6 +8,7 @@ import * as xml2js from 'xml2js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
 
@@ -207,14 +208,15 @@ export class PubMedSearcher extends PaperSource {
     
     logDebug(`PubMed ESearch Request: GET ${url}`);
     logDebug('PubMed ESearch params:', params);
-    
-    const response = await axios.get(url, {
-      params,
-      timeout: TIMEOUTS.DEFAULT,
-      headers: {
-        'User-Agent': USER_AGENT
-      }
-    });
+
+    const response = await ErrorHandler.retryWithBackoff(
+      () => axios.get(url, {
+        params,
+        timeout: TIMEOUTS.DEFAULT,
+        headers: { 'User-Agent': USER_AGENT }
+      }),
+      { context: 'PubMed ESearch' }
+    );
     
     logDebug(`PubMed ESearch Response: ${response.status} ${response.statusText}`);
     logDebug('PubMed ESearch Response data:', response.data.substring(0, 500));
@@ -250,13 +252,14 @@ export class PubMedSearcher extends PaperSource {
     }
 
     const url = `${this.baseApiUrl}/efetch.fcgi`;
-    const response = await axios.get(url, {
-      params,
-      timeout: TIMEOUTS.DEFAULT,
-      headers: {
-        'User-Agent': USER_AGENT
-      }
-    });
+    const response = await ErrorHandler.retryWithBackoff(
+      () => axios.get(url, {
+        params,
+        timeout: TIMEOUTS.DEFAULT,
+        headers: { 'User-Agent': USER_AGENT }
+      }),
+      { context: 'PubMed EFetch' }
+    );
     
     const result: EFetchResponse = await this.parseXmlResponse(response.data);
     

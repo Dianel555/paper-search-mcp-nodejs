@@ -40,6 +40,10 @@ jest.config.*
 
 #Claude
 .claude/
+claudedocs/
+
+#openspec
+openspec/
 
 # Logs
 logs/

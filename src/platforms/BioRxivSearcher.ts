@@ -10,6 +10,8 @@ import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
 
 interface BioRxivSearchOptions extends SearchOptions {
   /** 搜索天数范围 */
@@ -45,10 +47,16 @@ interface BioRxivPaper {
 
 export class BioRxivSearcher extends PaperSource {
   private readonly serverType: 'biorxiv' | 'medrxiv';
-  
+  private readonly rateLimiter: RateLimiter;
+
   constructor(serverType: 'biorxiv' | 'medrxiv' = 'biorxiv') {
     super(serverType, `https://api.biorxiv.org/details/${serverType}`);
     this.serverType = serverType;
+    // bioRxiv rate limit: 1 req/s, burst=2
+    this.rateLimiter = new RateLimiter({
+      requestsPerSecond: 1,
+      burstCapacity: 2
+    });
   }
 
   getCapabilities(): PlatformCapabilities {
@@ -89,13 +97,16 @@ export class BioRxivSearcher extends PaperSource {
       logDebug(`${this.serverType} API Request: GET ${searchUrl}`);
       logDebug(`${this.serverType} Request params:`, params);
 
-      const response = await axios.get(searchUrl, { 
-        params,
-        timeout: TIMEOUTS.DEFAULT,
-        headers: {
-          'User-Agent': USER_AGENT
-        }
-      });
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(searchUrl, {
+          params,
+          timeout: TIMEOUTS.DEFAULT,
+          headers: { 'User-Agent': USER_AGENT }
+        }),
+        { context: `${this.serverType} search` }
+      );
       
       logDebug(`${this.serverType} API Response: ${response.status} ${response.statusText}`);
       
@@ -132,13 +143,16 @@ export class BioRxivSearcher extends PaperSource {
         return filePath;
       }
 
-      const response = await axios.get(pdfUrl, {
-        responseType: 'stream',
-        timeout: TIMEOUTS.DOWNLOAD,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-      });
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(pdfUrl, {
+          responseType: 'stream',
+          timeout: TIMEOUTS.DOWNLOAD,
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        }),
+        { context: `${this.serverType} download` }
+      );
 
       const writer = fs.createWriteStream(filePath);
       response.data.pipe(writer);

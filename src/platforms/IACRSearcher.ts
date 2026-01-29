@@ -7,10 +7,13 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import * as fs from 'fs';
 import * as path from 'path';
+import pLimit from 'p-limit';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { TIMEOUTS } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
 
 interface IACRSearchOptions extends SearchOptions {
   /** 是否获取详细信息 */
@@ -20,7 +23,8 @@ interface IACRSearchOptions extends SearchOptions {
 export class IACRSearcher extends PaperSource {
   private readonly searchUrl: string;
   private readonly userAgents: string[];
-  
+  private readonly rateLimiter: RateLimiter;
+
   constructor() {
     super('iacr', 'https://eprint.iacr.org');
     this.searchUrl = `${this.baseUrl}/search`;
@@ -29,6 +33,11 @@ export class IACRSearcher extends PaperSource {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
     ];
+    // IACR rate limit: 1 req/s, burst=2
+    this.rateLimiter = new RateLimiter({
+      requestsPerSecond: 1,
+      burstCapacity: 2
+    });
   }
 
   getCapabilities(): PlatformCapabilities {
@@ -54,15 +63,20 @@ export class IACRSearcher extends PaperSource {
       logDebug(`IACR API Request: GET ${this.searchUrl}`);
       logDebug('IACR Request params:', params);
 
-      const response = await axios.get(this.searchUrl, {
-        params,
-        timeout: TIMEOUTS.DEFAULT,
-        headers: {
-          'User-Agent': this.getRandomUserAgent(),
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9'
-        }
-      });
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(this.searchUrl, {
+          params,
+          timeout: TIMEOUTS.DEFAULT,
+          headers: {
+            'User-Agent': this.getRandomUserAgent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
+          }
+        }),
+        { context: 'IACR search' }
+      );
       
       logDebug(`IACR API Response: ${response.status} ${response.statusText}`);
       
@@ -82,15 +96,20 @@ export class IACRSearcher extends PaperSource {
   async getPaperDetails(paperId: string): Promise<Paper | null> {
     try {
       const paperUrl = paperId.startsWith('http') ? paperId : `${this.baseUrl}/${paperId}`;
-      
-      const response = await axios.get(paperUrl, {
-        timeout: TIMEOUTS.DEFAULT,
-        headers: {
-          'User-Agent': this.getRandomUserAgent(),
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9'
-        }
-      });
+
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(paperUrl, {
+          timeout: TIMEOUTS.DEFAULT,
+          headers: {
+            'User-Agent': this.getRandomUserAgent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
+          }
+        }),
+        { context: 'IACR paper details' }
+      );
 
       if (response.status !== 200) {
         logDebug(`Failed to fetch paper details: HTTP ${response.status}`);
@@ -125,13 +144,16 @@ export class IACRSearcher extends PaperSource {
         return filePath;
       }
 
-      const response = await axios.get(pdfUrl, {
-        responseType: 'stream',
-        timeout: TIMEOUTS.EXTENDED,
-        headers: {
-          'User-Agent': this.getRandomUserAgent()
-        }
-      });
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(pdfUrl, {
+          responseType: 'stream',
+          timeout: TIMEOUTS.EXTENDED,
+          headers: { 'User-Agent': this.getRandomUserAgent() }
+        }),
+        { context: 'IACR download' }
+      );
 
       const writer = fs.createWriteStream(filePath);
       response.data.pipe(writer);
@@ -246,28 +268,26 @@ export class IACRSearcher extends PaperSource {
     // 如果需要详细信息，获取每篇论文的详细信息
     if (options.fetchDetails && papers.length > 0) {
       logDebug('Fetching detailed information for IACR papers...');
-      const detailedPapers: Paper[] = [];
-      
-      for (const paper of papers) {
-        try {
-          const detailedPaper = await this.getPaperDetails(paper.paperId);
-          if (detailedPaper) {
-            detailedPapers.push(detailedPaper);
-          } else {
-            detailedPapers.push(paper); // 退回到搜索结果数据
+
+      // Use p-limit to control concurrency (max 3 concurrent requests)
+      const limit = pLimit(3);
+
+      const detailPromises = papers.map(paper =>
+        limit(async () => {
+          try {
+            const detailedPaper = await this.getPaperDetails(paper.paperId);
+            return detailedPaper || paper; // 退回到搜索结果数据
+          } catch (error) {
+            logDebug(`Error fetching details for ${paper.paperId}:`, error);
+            return paper;
           }
-          
-          // 添加延迟避免过快请求
-          await this.delay(1000);
-        } catch (error) {
-          logDebug(`Error fetching details for ${paper.paperId}:`, error);
-          detailedPapers.push(paper);
-        }
-      }
-      
+        })
+      );
+
+      const detailedPapers = await Promise.all(detailPromises);
       return detailedPapers;
     }
-    
+
     return papers;
   }
 

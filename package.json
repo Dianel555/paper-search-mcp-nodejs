@@ -1,6 +1,6 @@
 {
   "name": "paper-search-mcp-nodejs",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "A Node.js MCP server for searching and downloading academic papers from multiple sources, including arXiv, PubMed, bioRxiv, Web of Science, and more.",
   "main": "dist/server.js",
   "type": "module",
@@ -35,12 +35,15 @@
     "axios": "^1.7.2",
     "cheerio": "^1.1.2",
     "dotenv": "^16.4.5",
-    "pdf-parse": "^1.1.1",
+    "lru-cache": "^11.2.5",
+    "p-limit": "^7.2.0",
+    "pdf-parse": "^1.1.4",
     "xml2js": "^0.6.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
+    "@types/lru-cache": "^7.10.9",
     "@types/node": "^20.14.10",
     "@types/xml2js": "^0.4.14",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
@@ -55,15 +58,30 @@
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
-    "extensionsToTreatAsEsm": [".ts"],
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules/(?!(p-limit|yocto-queue)/)"
+    ],
     "moduleNameMapper": {
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "transform": {
-      "^.+\\.tsx?$": ["ts-jest", { "useESM": true }]
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "useESM": true
+        }
+      ]
     },
-    "testMatch": ["**/tests/**/*.test.ts"],
-    "setupFilesAfterEnv": ["<rootDir>/tests/setup.ts"],
+    "testMatch": [
+      "**/tests/**/*.test.ts",
+      "**/__tests__/**/*.test.ts"
+    ],
+    "setupFilesAfterEnv": [
+      "<rootDir>/tests/setup.ts"
+    ],
     "collectCoverageFrom": [
       "src/**/*.ts",
       "!src/**/*.d.ts"

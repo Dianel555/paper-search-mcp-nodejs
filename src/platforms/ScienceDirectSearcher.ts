@@ -14,6 +14,8 @@ import axios, { AxiosInstance } from 'axios';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
+import { QuotaManager } from '../utils/QuotaManager.js';
 import { logDebug } from '../utils/Logger.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 
@@ -76,10 +78,11 @@ interface ElsevierArticleResponse {
 export class ScienceDirectSearcher extends PaperSource {
   private client: AxiosInstance;
   private rateLimiter: RateLimiter;
+  private quotaManager: QuotaManager;
 
   constructor(apiKey?: string) {
     super('sciencedirect', 'https://api.elsevier.com', apiKey);
-    
+
     this.client = axios.create({
       baseURL: 'https://api.elsevier.com',
       timeout: TIMEOUTS.DEFAULT,
@@ -90,14 +93,20 @@ export class ScienceDirectSearcher extends PaperSource {
       }
     });
 
-    // Elsevier rate limits: 
+    // Elsevier rate limits:
     // - Without key: 20 requests per minute
     // - With key: 10 requests per second (600 per minute)
     const requestsPerSecond = apiKey ? 10 : 0.33;
-    
-    this.rateLimiter = new RateLimiter({ 
+
+    this.rateLimiter = new RateLimiter({
       requestsPerSecond,
       burstCapacity: apiKey ? 20 : 5
+    });
+
+    this.quotaManager = QuotaManager.getInstance();
+    this.quotaManager.registerPlatform('sciencedirect', {
+      dailyLimit: 5000,
+      envPrefix: 'SCIENCEDIRECT'
     });
   }
 
@@ -139,12 +148,16 @@ export class ScienceDirectSearcher extends PaperSource {
       };
 
       await this.rateLimiter.waitForPermission();
+      this.quotaManager.checkQuota('sciencedirect');
 
-      const response = await this.client.put('/content/search/sciencedirect', requestBody, {
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.put('/content/search/sciencedirect', requestBody, {
+          headers: { 'Content-Type': 'application/json' }
+        }),
+        { context: 'ScienceDirect search' }
+      );
+
+      this.quotaManager.incrementUsage('sciencedirect');
 
       const results = response.data?.results || [];
 
@@ -232,10 +245,13 @@ export class ScienceDirectSearcher extends PaperSource {
     for (const paper of papers) {
       try {
         await this.rateLimiter.waitForPermission();
-        
-        const response = await this.client.get(`/content/article/pii/${paper.paperId}`, {
-          params: { view: 'META_ABS' }
-        });
+
+        const response = await ErrorHandler.retryWithBackoff(
+          () => this.client.get(`/content/article/pii/${paper.paperId}`, {
+            params: { view: 'META_ABS' }
+          }),
+          { context: 'ScienceDirect abstract' }
+        );
 
         const coredata = response.data?.['full-text-retrieval-response']?.coredata;
         if (coredata) {
@@ -300,11 +316,12 @@ export class ScienceDirectSearcher extends PaperSource {
     try {
       await this.rateLimiter.waitForPermission();
 
-      const response = await this.client.get<ElsevierArticleResponse>(`/content/article/doi/${doi}`, {
-        params: {
-          view: 'FULL'
-        }
-      });
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.get<ElsevierArticleResponse>(`/content/article/doi/${doi}`, {
+          params: { view: 'FULL' }
+        }),
+        { context: 'ScienceDirect article details' }
+      );
 
       const coredata = response.data['full-text-retrieval-response']?.coredata;
       if (!coredata) return null;

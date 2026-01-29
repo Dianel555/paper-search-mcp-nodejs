@@ -20,6 +20,7 @@ import axios, { AxiosInstance } from 'axios';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
 import { sanitizeDoi } from '../utils/SecurityUtils.js';
 import { TIMEOUTS } from '../config/constants.js';
 
@@ -91,13 +92,16 @@ export class WileySearcher extends PaperSource {
     await this.rateLimiter.waitForPermission();
 
     try {
-      const response = await this.client.get(url, {
-        responseType: 'stream',
-        headers: {
-          'Wiley-TDM-Client-Token': this.apiKey,
-          'Accept': 'application/pdf'
-        }
-      });
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.get(url, {
+          responseType: 'stream',
+          headers: {
+            'Wiley-TDM-Client-Token': this.apiKey,
+            'Accept': 'application/pdf'
+          }
+        }),
+        { context: 'Wiley download' }
+      );
 
       // Generate filename from DOI
       const fileName = `${cleanDoi.replace(/[\/\\:*?"<>|]/g, '_')}.pdf`;

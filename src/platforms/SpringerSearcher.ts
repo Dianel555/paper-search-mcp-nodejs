@@ -17,6 +17,8 @@ import { sanitizeDoi, escapeQueryValue, withTimeout, validateQueryComplexity } f
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
+import { QuotaManager } from '../utils/QuotaManager.js';
 import { logDebug, logWarn } from '../utils/Logger.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 
@@ -62,16 +64,17 @@ export class SpringerSearcher extends PaperSource {
   private metadataClient: AxiosInstance;
   private openAccessClient: AxiosInstance;
   private rateLimiter: RateLimiter;
+  private quotaManager: QuotaManager;
   private hasOpenAccessAPI: boolean | undefined;
   private openAccessApiKey?: string;
   private testingPromise: Promise<void> | null = null;
 
   constructor(apiKey?: string, openAccessApiKey?: string) {
     super('springer', 'https://api.springernature.com', apiKey);
-    
+
     // Check for separate OpenAccess API key from environment
     this.openAccessApiKey = openAccessApiKey || process.env.SPRINGER_OPENACCESS_API_KEY || apiKey;
-    
+
     // Use v2 API endpoint for metadata
     this.metadataClient = axios.create({
       baseURL: 'https://api.springernature.com/meta/v2',
@@ -96,9 +99,15 @@ export class SpringerSearcher extends PaperSource {
     // - 5000 requests per day for both APIs combined
     // - Approximately 200 per hour or 3-4 per minute to be safe
     // Note: The same API key works for both Metadata and OpenAccess APIs
-    this.rateLimiter = new RateLimiter({ 
+    this.rateLimiter = new RateLimiter({
       requestsPerSecond: 0.05, // Conservative: 3 per minute
       burstCapacity: 5
+    });
+
+    this.quotaManager = QuotaManager.getInstance();
+    this.quotaManager.registerPlatform('springer', {
+      dailyLimit: 5000,
+      envPrefix: 'SPRINGER'
     });
   }
 
@@ -167,16 +176,23 @@ export class SpringerSearcher extends PaperSource {
       }
 
       await this.rateLimiter.waitForPermission();
+      this.quotaManager.checkQuota('springer');
 
       // Choose the appropriate API
       let response: any;
       if (useOpenAccess) {
-        // Use OpenAccess API (if available)
-        response = await this.openAccessClient.get<SpringerResponse>('/json', { params });
+        response = await ErrorHandler.retryWithBackoff(
+          () => this.openAccessClient.get<SpringerResponse>('/json', { params }),
+          { context: 'Springer OpenAccess search' }
+        );
       } else {
-        // Use Meta v2 API
-        response = await this.metadataClient.get<SpringerResponse>('/json', { params });
+        response = await ErrorHandler.retryWithBackoff(
+          () => this.metadataClient.get<SpringerResponse>('/json', { params }),
+          { context: 'Springer Meta search' }
+        );
       }
+
+      this.quotaManager.incrementUsage('springer');
 
       // Handle different response structures
       // Meta v2 API: records contains the actual papers, result contains metadata
@@ -330,9 +346,10 @@ export class SpringerSearcher extends PaperSource {
     const filePath = path.join(savePath, fileName);
 
     try {
-      const response = await axios.get(paper.pdfUrl, {
-        responseType: 'stream'
-      });
+      const response = await ErrorHandler.retryWithBackoff(
+        () => axios.get(paper.pdfUrl, { responseType: 'stream' }),
+        { context: 'Springer download' }
+      );
 
       const writer = fs.createWriteStream(filePath);
       response.data.pipe(writer);

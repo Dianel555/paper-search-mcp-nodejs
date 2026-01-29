@@ -9,6 +9,7 @@ import { Paper, PaperFactory } from '../models/Paper.js';
 import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
 import { TIMEOUTS } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
 
 interface GoogleScholarOptions extends SearchOptions {
   /** 语言设置 */
@@ -158,7 +159,10 @@ export class GoogleScholarSearcher extends PaperSource {
     logDebug(`Google Scholar Request: GET ${this.scholarUrl}`);
     logDebug('Scholar params:', params);
 
-    return await axios.get(this.scholarUrl, config);
+    return await ErrorHandler.retryWithBackoff(
+      () => axios.get(this.scholarUrl, config),
+      { context: 'Google Scholar search' }
+    );
   }
 
   /**

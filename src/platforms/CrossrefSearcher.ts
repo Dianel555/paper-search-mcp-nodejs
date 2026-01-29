@@ -13,22 +13,38 @@ import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } fro
 import { sanitizeDoi, withTimeout } from '../utils/SecurityUtils.js';
 import { API_ENDPOINTS, DEFAULT_MAILTO, TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
+import { ErrorHandler } from '../utils/ErrorHandler.js';
+import { RequestCache } from '../utils/RequestCache.js';
 
 export class CrossrefSearcher extends PaperSource {
   private client: AxiosInstance;
   private mailto: string;
+  private readonly rateLimiter: RateLimiter;
+  private readonly cache: RequestCache<Paper[]>;
 
   constructor(mailto?: string) {
     super('crossref', 'https://api.crossref.org/works', undefined);
     this.mailto = mailto || process.env.CROSSREF_MAILTO || DEFAULT_MAILTO;
-    
+
     this.client = axios.create({
       baseURL: this.baseUrl,
       timeout: TIMEOUTS.DEFAULT,
       headers: {
         'Accept': 'application/json',
-        'User-Agent': `${USER_AGENT} paper-search-mcp-nodejs/0.2.5 (mailto:${this.mailto})`
+        'User-Agent': `${USER_AGENT} paper-search-mcp-nodejs/0.2.6 (mailto:${this.mailto})`
       }
+    });
+
+    // Crossref polite pool: 50 req/s with mailto, conservative 3 req/s, burst=5
+    this.rateLimiter = new RateLimiter({
+      requestsPerSecond: 3,
+      burstCapacity: 5
+    });
+
+    this.cache = new RequestCache<Paper[]>({
+      maxSize: 100,
+      ttlMs: 3600000 // 1 hour
     });
   }
 
@@ -54,8 +70,20 @@ export class CrossrefSearcher extends PaperSource {
   }
 
   async search(query: string, options: SearchOptions = {}): Promise<Paper[]> {
+    const customOptions = options as any;
+    const forceRefresh = customOptions.forceRefresh === true;
+
+    // Check cache first
+    if (!forceRefresh) {
+      const cacheKey = this.cache.generateKey('crossref', query, options);
+      const cached = this.cache.get(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     const maxResults = Math.min(options.maxResults || 10, 1000);
-    
+
     const params: Record<string, any> = {
       query: query,
       rows: maxResults,
@@ -95,12 +123,23 @@ export class CrossrefSearcher extends PaperSource {
     params.order = options.sortOrder === 'asc' ? 'asc' : 'desc';
 
     try {
-      const response = await this.client.get('', { params });
-      
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.get('', { params }),
+        { context: 'Crossref search' }
+      );
+
       if (response.status === 200 && response.data?.message?.items) {
-        return this.parseSearchResponse(response.data);
+        const papers = this.parseSearchResponse(response.data);
+
+        // Cache results
+        const cacheKey = this.cache.generateKey('crossref', query, options);
+        this.cache.set(cacheKey, papers);
+
+        return papers;
       }
-      
+
       return [];
     } catch (error: any) {
       this.handleHttpError(error, 'search');
@@ -116,9 +155,12 @@ export class CrossrefSearcher extends PaperSource {
     try {
       // Encode DOI for URL path (DOIs can contain special characters like /)
       const encodedDoi = encodeURIComponent(cleanDoi);
-      const response = await this.client.get(`/${encodedDoi}`, {
-        params: { mailto: this.mailto }
-      });
+      await this.rateLimiter.waitForPermission();
+
+      const response = await ErrorHandler.retryWithBackoff(
+        () => this.client.get(`/${encodedDoi}`, { params: { mailto: this.mailto } }),
+        { context: 'Crossref getPaperByDoi' }
+      );
 
       if (response.status === 200 && response.data?.message) {
         const paper = this.parsePaper(response.data.message);
