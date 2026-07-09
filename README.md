@@ -8,7 +8,7 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)
 
 ## ✨ Key Features
 
@@ -444,8 +444,23 @@ src/
 │   ├── WileySearcher.ts      # Wiley TDM API (DOI-based PDF download only)
 │   ├── ScopusSearcher.ts     # Scopus citation database searcher
 │   └── CrossrefSearcher.ts   # Crossref API searcher (default platform)
+├── mcp/
+│   ├── tools.ts              # MCP tool definitions
+│   ├── schemas.ts            # Zod schemas for tool arguments
+│   ├── handleToolCall.ts     # Tool call dispatcher
+│   └── searchers.ts          # Searcher initialization
 ├── utils/
-│   └── RateLimiter.ts        # Token bucket rate limiter
+│   ├── SecurityUtils.ts      # DOI validation, query sanitization, injection prevention
+│   ├── ErrorHandler.ts       # Unified error handling with retry logic
+│   ├── RateLimiter.ts        # Token bucket rate limiting
+│   ├── QuotaManager.ts       # Daily quota tracking
+│   ├── RequestCache.ts       # LRU caching for requests
+│   ├── PDFExtractor.ts       # PDF text extraction
+│   └── Logger.ts             # Debug logging
+├── config/
+│   └── constants.ts          # Timeouts, endpoints, limits
+├── services/
+│   └── CitationService.ts    # Citation fetching service
 └── server.ts                 # MCP server main file
 ```
 
@@ -453,36 +468,11 @@ src/
 
 1. Create new searcher class extending `PaperSource`
 2. Implement required abstract methods
-3. Register new searcher in `server.ts`
-4. Add corresponding MCP tool
+3. Register new searcher in `searchers.ts`
+4. Add corresponding MCP tool in `tools.ts`
 
-### Security Features (v0.2.6)
+### Security Best Practices
 
-The codebase includes comprehensive security and optimization utilities:
-
-```
-src/utils/
-├── SecurityUtils.ts      # Security utilities
-│   ├── sanitizeDoi()     # DOI format validation
-│   ├── escapeQueryValue() # Query injection prevention
-│   ├── validateQueryComplexity() # DoS prevention
-│   ├── withTimeout()     # Request timeout protection
-│   ├── sanitizeRequest() # Sensitive data removal
-│   └── maskSensitiveData() # API key masking
-├── ErrorHandler.ts       # Unified error handling
-│   ├── ApiError class    # Custom error with metadata
-│   ├── HTTP error codes  # 400-504 handling
-│   └── Retry logic       # Exponential backoff
-├── RateLimiter.ts        # Token bucket rate limiting
-├── QuotaManager.ts       # Daily quota tracking (New in v0.2.6)
-├── RequestCache.ts       # LRU caching for requests (New in v0.2.6)
-└── PDFExtractor.ts       # PDF text extraction (New in v0.2.6)
-
-src/services/
-└── CitationService.ts    # Citation fetching service (New in v0.2.6)
-```
-
-**Security Best Practices:**
 - All DOIs are validated before use in URLs
 - Query parameters are escaped to prevent injection
 - API keys are masked in all log output
@@ -492,8 +482,6 @@ src/services/
 - Caching reduces external API calls
 
 ### Testing
-
-The test suite has been reorganized for better maintainability (v0.2.6):
 
 ```bash
 # Run tests
@@ -511,7 +499,7 @@ npm run format
 - All 13 platform searchers tested
 - Security utilities (DOI validation, query sanitization)
 - ErrorHandler (error classification, retry logic)
-- **New Tests**: Rate limiting integration, QuotaManager, RequestCache
+- Rate limiting integration, QuotaManager, RequestCache
 
 | Test Suite | Coverage |
 |------------|----------|
@@ -600,8 +588,11 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.2.6 Improvements:**
+**🔧 v0.2.7 Improvements:**
 
+- ✅ **Google Scholar**: Major anti-detection overhaul — session management, cookie persistence, 429/captcha detection with auto-retry, adaptive delay, and proxy support (`SCHOLAR_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`)
+- ✅ **arXiv**: Fixed search query prefix (`all:`) to comply with arXiv API spec
+- ✅ **Google Scholar**: Updated User-Agents to latest browser versions (Chrome 131, Firefox 133, Edge 131)
 - ✅ **Performance**: Implemented `RequestCache` for caching search results and API responses
 - ✅ **Reliability**: Added `RateLimiter` and `QuotaManager` to prevent API abuse and 429 errors
 - ✅ **New Features**: Added `CitationService` and `PDFExtractor` for future enhancements
@@ -661,7 +652,20 @@ export NODE_ENV=development
 - **Academic Paper Priority**: Automatically filters out books, prioritizes peer-reviewed papers
 - **Citation Data**: Provides citation counts and academic metrics
 - **Anti-Detection**: Smart request patterns to avoid blocking
+- **Session Management**: Cookie persistence across requests to mimic real browser behavior
+- **Adaptive Delay**: Dynamic backoff that increases on consecutive failures
+- **429/Captcha Detection**: Detects rate-limit and captcha responses, resets session and retries
+- **Proxy Support**: Optional HTTP/HTTPS/SOCKS proxy to bypass IP-based blocking
 - **Comprehensive Coverage**: Searches across all academic publishers
+
+> **Google Scholar Blocking**: Google aggressively blocks direct programmatic access by IP. If searches fail with rate-limit/captcha errors, configure a proxy via the `SCHOLAR_PROXY` environment variable (also falls back to `HTTPS_PROXY`/`HTTP_PROXY`):
+> ```bash
+> # HTTP/HTTPS proxy
+> SCHOLAR_PROXY=http://user:pass@host:port
+> # SOCKS proxy
+> SCHOLAR_PROXY=socks://host:port
+> ```
+> Required packages are loaded lazily (`http-proxy-agent`, `https-proxy-agent`, `socks-proxy-agent`) — install the one matching your proxy type.
 
 ### Semantic Scholar Features
 

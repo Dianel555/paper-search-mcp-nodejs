@@ -99,6 +99,7 @@ export class ArxivSearcher extends PaperSource {
 
       const params = {
         search_query: searchQuery,
+        start: options.maxResults ? 0 : 0,
         max_results: options.maxResults || 10,
         sortBy: this.mapSortField(options.sortBy || 'relevance'),
         sortOrder: sortOrderMap[options.sortOrder || 'desc'] || 'descending'
@@ -201,7 +202,7 @@ export class ArxivSearcher extends PaperSource {
    * 构建搜索查询
    */
   private buildSearchQuery(query: string, options: SearchOptions): string {
-    let searchQuery = query;
+    let searchQuery = `all:${query}`;
 
     // 添加作者过滤
     if (options.author) {

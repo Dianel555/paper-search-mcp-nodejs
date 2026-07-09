@@ -7,7 +7,7 @@
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)
 
 ## ✨ 核心特性
 
@@ -461,8 +461,23 @@ src/
 │   ├── WileySearcher.ts      # Wiley TDM API（仅DOI下载）
 │   ├── ScopusSearcher.ts     # Scopus引文数据库搜索器
 │   └── CrossrefSearcher.ts   # Crossref API搜索器（默认平台）
+├── mcp/
+│   ├── tools.ts              # MCP工具定义
+│   ├── schemas.ts            # Zod参数校验
+│   ├── handleToolCall.ts     # 工具调用分发
+│   └── searchers.ts          # 搜索器初始化
 ├── utils/
-│   └── RateLimiter.ts        # 令牌桶速率限制器
+│   ├── SecurityUtils.ts      # DOI验证、查询清理、注入防护
+│   ├── ErrorHandler.ts       # 统一错误处理与重试逻辑
+│   ├── RateLimiter.ts        # 令牌桶速率限制
+│   ├── QuotaManager.ts       # 每日配额追踪
+│   ├── RequestCache.ts       # 请求LRU缓存
+│   ├── PDFExtractor.ts       # PDF文本提取
+│   └── Logger.ts             # 调试日志
+├── config/
+│   └── constants.ts          # 超时、端点、限制配置
+├── services/
+│   └── CitationService.ts    # 引文获取服务
 └── server.ts                 # MCP服务器主文件
 ```
 
@@ -470,36 +485,11 @@ src/
 
 1. 创建新的搜索器类继承 `PaperSource`
 2. 实现必需的抽象方法
-3. 在 `server.ts` 中注册新的搜索器
-4. 添加相应的MCP工具
+3. 在 `searchers.ts` 中注册新的搜索器
+4. 在 `tools.ts` 中添加相应的MCP工具
 
-### 安全特性 (v0.2.6)
+### 安全最佳实践
 
-代码库包含全面的安全和优化工具：
-
-```
-src/utils/
-├── SecurityUtils.ts      # 安全工具
-│   ├── sanitizeDoi()     # DOI格式验证
-│   ├── escapeQueryValue() # 查询注入防护
-│   ├── validateQueryComplexity() # DoS防护
-│   ├── withTimeout()     # 请求超时保护
-│   ├── sanitizeRequest() # 敏感数据移除
-│   └── maskSensitiveData() # API密钥脱敏
-├── ErrorHandler.ts       # 统一错误处理
-│   ├── ApiError class    # 带元数据的自定义错误
-│   ├── HTTP error codes  # 400-504错误处理
-│   └── Retry logic       # 指数退避重试
-├── RateLimiter.ts        # 令牌桶速率限制
-├── QuotaManager.ts       # 每日配额追踪 (v0.2.6 新增)
-├── RequestCache.ts       # 请求LRU缓存 (v0.2.6 新增)
-└── PDFExtractor.ts       # PDF文本提取 (v0.2.6 新增)
-
-src/services/
-└── CitationService.ts    # 引文获取服务 (v0.2.6 新增)
-```
-
-**安全最佳实践：**
 - 所有DOI在使用前都经过验证
 - 查询参数经过转义以防止注入
 - 所有日志输出中的API密钥都已脱敏
@@ -509,8 +499,6 @@ src/services/
 - 缓存减少外部API调用
 
 ### 测试
-
-测试套件已重组以提高可维护性 (v0.2.6)：
 
 ```bash
 # 运行测试
@@ -528,7 +516,7 @@ npm run format
 - 所有13个平台搜索器已测试
 - 安全工具（DOI验证、查询清理）
 - 错误处理器（错误分类、重试逻辑）
-- **新测试**：速率限制集成、配额管理、请求缓存
+- 速率限制集成、配额管理、请求缓存
 
 | 测试套件 | 覆盖状态 |
 |----------|----------|
@@ -604,8 +592,11 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.2.6 改进:**
+**🔧 v0.2.7 改进:**
 
+- ✅ **Google Scholar**: 大幅增强反检测 — 会话管理、Cookie持久化、429/captcha检测自动重试、自适应延迟、代理支持（`SCHOLAR_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`）
+- ✅ **arXiv**: 修复搜索查询前缀（`all:`），符合arXiv API规范
+- ✅ **Google Scholar**: 更新User-Agent到最新浏览器版本（Chrome 131, Firefox 133, Edge 131）
 - ✅ **性能优化**: 实现了 `RequestCache` 缓存搜索结果和API响应
 - ✅ **可靠性**: 添加了 `RateLimiter` 和 `QuotaManager` 防止API滥用和429错误
 - ✅ **新功能**: 添加了 `CitationService` 和 `PDFExtractor` 用于未来增强
