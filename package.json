@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "type": "module",
   "bin": {
-    "paper-search-mcp-nodejs": "./dist/server.js"
+    "paper-search-mcp-nodejs": "dist/server.js"
   },
   "scripts": {
     "build": "npx tsc",
@@ -95,7 +95,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Dianel555/paper-search-nodejs.git"
+    "url": "git+https://github.com/Dianel555/paper-search-nodejs.git"
   },
   "homepage": "https://github.com/Dianel555/paper-search-nodejs#readme",
   "bugs": {
