@@ -3,7 +3,7 @@
  * Provides consistent error handling across all platforms
  */
 
-import { sanitizeRequest, maskSensitiveData } from './SecurityUtils.js';
+import { sanitizeRequest, sanitizeBody, sanitizeSensitiveText, maskSensitiveData } from './SecurityUtils.js';
 import { logError as loggerError, logDebug } from './Logger.js';
 
 /**
@@ -75,6 +75,18 @@ export class ApiError extends Error {
 /**
  * Error Handler class for unified error processing
  */
+export interface RetryWithBackoffOptions {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  context?: string;
+  signal?: AbortSignal;
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  random?: () => number;
+  shouldRetry?: (error: unknown, attempt: number) => boolean;
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
+}
+
 export class ErrorHandler {
   private platform: string;
   private verbose: boolean;
@@ -89,7 +101,7 @@ export class ErrorHandler {
    */
   handleHttpError(error: any, operation: string): never {
     const status = error.response?.status;
-    const responseMessage = this.extractErrorMessage(error);
+    const responseMessage = sanitizeSensitiveText(this.extractErrorMessage(error));
     const url = error.config?.url;
     const method = error.config?.method?.toUpperCase() || 'GET';
 
@@ -105,7 +117,7 @@ export class ErrorHandler {
       method,
       operation,
       config: this.verbose ? sanitizedConfig : undefined,
-      responseData: this.verbose ? error.response?.data : undefined
+      responseData: this.verbose ? sanitizeBody(error.response?.data) : undefined
     });
 
     // Create user-friendly error message
@@ -129,12 +141,12 @@ export class ErrorHandler {
       this.handleHttpError(error, operation);
     }
 
-    const message = error.message || 'Unknown error occurred';
-    
+    const message = sanitizeSensitiveText(error.message || 'Unknown error occurred');
+
     this.logError({
       message,
       operation,
-      stack: this.verbose ? error.stack : undefined
+      stack: this.verbose && error.stack ? sanitizeSensitiveText(error.stack) : undefined
     });
 
     throw new ApiError({
@@ -193,7 +205,7 @@ export class ErrorHandler {
     // Generic message
     const prefix = `${this.platform} ${operation} failed`;
     const statusInfo = status ? ` (${status}${statusDesc ? ': ' + statusDesc : ''})` : '';
-    return `${prefix}${statusInfo}: ${maskSensitiveData(message)}`;
+    return `${prefix}${statusInfo}: ${maskSensitiveData(sanitizeSensitiveText(message))}`;
   }
 
   /**
@@ -202,16 +214,19 @@ export class ErrorHandler {
   private sanitizeUrl(url: string): string {
     try {
       const urlObj = new URL(url);
-      // Remove sensitive query parameters
-      const sensitiveParams = ['api_key', 'apikey', 'key', 'token', 'secret', 'auth'];
-      sensitiveParams.forEach(param => {
-        if (urlObj.searchParams.has(param)) {
-          urlObj.searchParams.set(param, '***');
+      urlObj.username = '';
+      urlObj.password = '';
+      for (const [key] of urlObj.searchParams) {
+        const normalizedKey = key.toLowerCase().replace(/[-_]/g, '');
+        if (normalizedKey.includes('apikey') || normalizedKey.includes('token') ||
+            normalizedKey.includes('secret') || normalizedKey.includes('auth') ||
+            normalizedKey.includes('session') || normalizedKey.includes('jwt') ||
+            normalizedKey.includes('sso') || normalizedKey.includes('saml') || normalizedKey === 'key') {
+          urlObj.searchParams.set(key, '***');
         }
-      });
+      }
       return urlObj.toString();
     } catch {
-      // If URL parsing fails, mask the entire thing
       return '***sanitized-url***';
     }
   }
@@ -271,44 +286,130 @@ export class ErrorHandler {
    */
   static async retryWithBackoff<T>(
     fn: () => Promise<T>,
-    options: {
-      maxRetries?: number;
-      initialDelayMs?: number;
-      maxDelayMs?: number;
-      context?: string;
-    } = {}
+    options: RetryWithBackoffOptions = {}
   ): Promise<T> {
     const {
       maxRetries = 3,
       initialDelayMs = 1000,
       maxDelayMs = 30000,
-      context = 'operation'
+      context = 'operation',
+      signal,
+      sleep = sleepWithAbort,
+      random = Math.random,
+      shouldRetry = (error: unknown) => ErrorHandler.isRetryable(error),
+      onRetry
     } = options;
 
-    let lastError: any;
+    let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      throwIfAborted(signal);
       try {
         return await fn();
-      } catch (error: any) {
+      } catch (error: unknown) {
         lastError = error;
 
-        if (attempt >= maxRetries || !ErrorHandler.isRetryable(error)) {
+        if (signal?.aborted) {
+          // Retrieval providers attach identity/billing to cancellation errors;
+          // keep those observations when the linked signal aborts after the
+          // attempt has already produced its terminal error.
+          if (isAbortAwareError(error)) throw error;
+          throw createAbortError();
+        }
+        if (attempt >= maxRetries || !shouldRetry(error, attempt)) {
           throw error;
         }
 
-        // Exponential backoff with full jitter
+        // Exponential backoff with full jitter. Existing callers retain the
+        // previous defaults; retrieval callers inject their own bounded values.
         const baseDelay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt));
-        const jitteredDelay = Math.floor(Math.random() * baseDelay);
+        const boundedRandom = Math.min(1, Math.max(0, Number(random()) || 0));
+        const jitteredDelay = Math.floor(boundedRandom * baseDelay);
 
         logDebug(`[Retry] ${context} attempt ${attempt + 1}/${maxRetries} failed, retrying in ${jitteredDelay}ms`);
-
-        await new Promise(resolve => setTimeout(resolve, jitteredDelay));
+        onRetry?.(error, attempt, jitteredDelay);
+        await waitForRetry(sleep, jitteredDelay, signal);
       }
     }
 
     throw lastError;
   }
+}
+
+function isAbortAwareError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as { code?: unknown }).code;
+  return code === 'cancelled' || code === 'timeout';
+}
+
+function createAbortError(): Error {
+  const error = new Error('Operation aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw createAbortError();
+}
+
+async function waitForRetry(
+  sleep: (milliseconds: number, signal?: AbortSignal) => Promise<void>,
+  milliseconds: number,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!signal) {
+    await sleep(milliseconds);
+    return;
+  }
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(createAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve()
+      .then(() => sleep(milliseconds, signal))
+      .then(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      }, error => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+  });
+}
+
+function sleepWithAbort(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, milliseconds));
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(createAbortError());
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export default ErrorHandler;

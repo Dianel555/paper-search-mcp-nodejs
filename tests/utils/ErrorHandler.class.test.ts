@@ -198,6 +198,20 @@ describe('ErrorHandler', () => {
       expect(() => errorHandler.handleHttpError(mockError, 'search')).toThrow(ApiError);
     });
 
+    it('redacts credentials from generic error messages', () => {
+      let caught: unknown;
+      try {
+        errorHandler.handleError({ message: 'Authorization: Bearer bearer-secret; session=session-secret' }, 'search');
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ApiError);
+      const message = (caught as ApiError).message;
+      expect(message).not.toContain('bearer-secret');
+      expect(message).not.toContain('session-secret');
+    });
+
     it('should include platform name in error message', () => {
       const mockError = {
         response: {

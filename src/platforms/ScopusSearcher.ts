@@ -135,11 +135,21 @@ export class ScopusSearcher extends PaperSource {
   private elsevierApiKey?: string;
 
   constructor(apiKey?: string, searchApiKey?: string) {
-    super('scopus', 'https://api.elsevier.com', apiKey);
+    const configuredElsevierApiKey = firstConfiguredKey(apiKey, process.env.ELSEVIER_API_KEY);
+    const configuredSearchApiKey = firstConfiguredKey(
+      searchApiKey,
+      process.env.SCOPUS_SEARCH_API_KEY,
+      configuredElsevierApiKey
+    );
+    // The PaperSource key represents the search capability. This allows a
+    // dedicated SCOPUS_SEARCH_API_KEY to work even when the general Elsevier
+    // key is intentionally not configured.
+    super('scopus', 'https://api.elsevier.com', configuredSearchApiKey);
 
-    // Support two API keys: one for search, one for other operations
-    this.elsevierApiKey = apiKey || process.env.ELSEVIER_API_KEY;
-    this.searchApiKey = searchApiKey || process.env.SCOPUS_SEARCH_API_KEY || this.elsevierApiKey;
+    // Keep the general Elsevier key separate: abstract/reference endpoints
+    // must not silently inherit a key intended only for Scopus Search.
+    this.elsevierApiKey = configuredElsevierApiKey;
+    this.searchApiKey = configuredSearchApiKey;
 
     this.client = axios.create({
       baseURL: 'https://api.elsevier.com',
@@ -312,8 +322,8 @@ export class ScopusSearcher extends PaperSource {
   }
 
   async getAbstract(scopusId: string): Promise<Paper | null> {
-    if (!this.apiKey) {
-      throw new Error('Scopus API key is required');
+    if (!this.elsevierApiKey) {
+      throw new Error('General Elsevier API key is required for Scopus abstract retrieval');
     }
 
     try {
@@ -321,7 +331,10 @@ export class ScopusSearcher extends PaperSource {
 
       const response = await ErrorHandler.retryWithBackoff(
         () => this.client.get<ScopusAbstractResponse>(`/content/abstract/scopus_id/${scopusId}`, {
-          params: { view: 'FULL' }
+          params: { view: 'FULL' },
+          headers: {
+            'X-ELS-APIKey': this.elsevierApiKey
+          }
         }),
         { context: 'Scopus abstract' }
       );
@@ -511,4 +524,8 @@ export class ScopusSearcher extends PaperSource {
       return null;
     }
   }
+}
+
+function firstConfiguredKey(...values: Array<string | undefined>): string | undefined {
+  return values.find(value => typeof value === 'string' && value.trim() !== '')?.trim();
 }

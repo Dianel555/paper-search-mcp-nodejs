@@ -40,7 +40,11 @@ export function sanitizeDownloadPath(
   }
 
   const resolvedBase = path.resolve(baseDir);
-  const resolvedTarget = path.resolve(resolvedBase, trimmed);
+  // Accept an already-resolved absolute path only when it remains inside the
+  // configured base; this lets MCP validate once and pass the result inward.
+  const resolvedTarget = path.isAbsolute(trimmed)
+    ? path.resolve(trimmed)
+    : path.resolve(resolvedBase, trimmed);
 
   // Lexical check: ensure the resolved target stays within the base directory.
   const relative = path.relative(resolvedBase, resolvedTarget);
@@ -52,13 +56,16 @@ export function sanitizeDownloadPath(
     };
   }
 
-  // Real-path check: resolve symlinks/junctions and re-verify containment.
-  // If the target (or any existing ancestor) is a symlink/junction pointing
-  // outside baseDir, realpathSync will reveal the true destination.
+  // Real-path check: resolve the nearest existing ancestor so a symlink or
+  // junction in a not-yet-created target path cannot bypass containment.
   try {
     const realBase = fs.realpathSync.native(resolvedBase);
-    const realTarget = fs.realpathSync.native(resolvedTarget);
-    const realRelative = path.relative(realBase, realTarget);
+    let existingAncestor = resolvedTarget;
+    while (!fs.existsSync(existingAncestor) && existingAncestor !== path.dirname(existingAncestor)) {
+      existingAncestor = path.dirname(existingAncestor);
+    }
+    const realAncestor = fs.realpathSync.native(existingAncestor);
+    const realRelative = path.relative(realBase, realAncestor);
     if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
       return {
         valid: false,
@@ -67,8 +74,8 @@ export function sanitizeDownloadPath(
       };
     }
   } catch {
-    // realpathSync fails if the path doesn't exist yet — that's fine,
-    // the lexical check already passed. A non-existent path can't be a symlink.
+    // If the base itself does not exist yet, the lexical containment check is
+    // still enforced; callers create the already-validated directory later.
   }
 
   return { valid: true, sanitized: resolvedTarget };
@@ -137,6 +144,9 @@ export function sanitizeHeaders(headers: Record<string, any>): Record<string, an
     /^api[-_]?key$/i,
     /^x[-_]api[-_]key$/i,
     /^authorization$/i,
+    /^auth$/i,
+    /^secret$/i,
+    /^password$/i,
     /^x[-_]apikey$/i,
     /^access[-_]token$/i,
     /^bearer$/i,
@@ -144,6 +154,7 @@ export function sanitizeHeaders(headers: Record<string, any>): Record<string, an
     /^cookie$/i,
     /^set[-_]cookie$/i,
     /^x[-_]csrf[-_]token$/i,
+    /(?:^|[-_])(?:session|jwt|sso|saml)(?:[-_]|$)/i,
     /^x[-_]forwarded[-_]for$/i, // May contain IP
     /^referer$/i, // May contain sensitive URLs
     /^user[-_]agent$/i // May contain system info
@@ -180,16 +191,8 @@ export function sanitizeParams(params: Record<string, any>): Record<string, any>
   const sanitized = { ...params };
 
   Object.keys(sanitized).forEach(key => {
-    const lowerKey = key.toLowerCase();
-
-    // Check for common sensitive parameter names
-    if (lowerKey.includes('api_key') ||
-        lowerKey.includes('apikey') ||
-        lowerKey.includes('token') ||
-        lowerKey.includes('secret') ||
-        lowerKey.includes('password') ||
-        lowerKey.includes('private') ||
-        lowerKey.includes('auth')) {
+    // Check for common sensitive parameter names without treating author as auth data.
+    if (isSensitiveBodyKey(key)) {
       sanitized[key] = '***REDACTED***';
     }
 
@@ -201,6 +204,39 @@ export function sanitizeParams(params: Record<string, any>): Record<string, any>
   });
 
   return sanitized;
+}
+
+/**
+ * Redact secrets from free-form text before it reaches logs or MCP output.
+ * Keep this as the single text sanitizer used by all error/logging paths.
+ */
+export function sanitizeSensitiveText(value: unknown): string {
+  return String(value)
+    .replace(/([?&](?:x[-_]?api[-_]?key|api[-_]?key|apikey|token|secret|auth|key|session|jwt|sso|saml)=)[^&#\s"'},;\]]*/gi, '$1***')
+    .replace(/((?:["']?(?:cookie|set[-_]?cookie)["']?\s*[:=]\s*))(?:"[^"]*"|'[^']*'|[^,\r\n}]+)/gi, (match, prefix) => {
+      const value = match.slice(prefix.length).trimStart();
+      const quote = value[0] === '"' || value[0] === "'" ? value[0] : '';
+      return `${prefix}${quote}***${quote}`;
+    })
+    .replace(/((?:["']?authorization["']?\s*[:=]\s*))(?:"[^"]*"|'[^']*'|[^,\r\n}]+)/gi, (match, prefix) => {
+      const value = match.slice(prefix.length).trimStart();
+      const quote = value[0] === '"' || value[0] === "'" ? value[0] : '';
+      return `${prefix}${quote}***${quote}`;
+    })
+    .replace(/((?:["']?(?:x[-_]?api[-_]?key|api[-_]?key|apikey|auth|session|jwt|sso|saml|token|secret)["']?)\s*[:=]\s*["']?)[^\s,;}"']+/gi, '$1***')
+    .replace(/((?:https?|socks\d?):\/\/)[^/\s@]+@/gi, '$1***@')
+    .replace(/\b(Bearer|Basic)\s+[^\s,;}"'\\]+/gi, '$1 ***');
+}
+
+function isSensitiveBodyKey(key: string): boolean {
+  const normalizedKey = key.toLowerCase().replace(/[-_]/g, '');
+  // This is an explicit status value, not the API key itself.
+  if (normalizedKey === 'apikeystatus') return false;
+  if (/(?:password|passphrase|secret|token|apikey|private|cookie|session|jwt|sso|saml)/i.test(normalizedKey)) {
+    return true;
+  }
+  return /^(?:auth|oauth|authorization|authentication|basicauth|basic|bearer)(?:header|key|token|secret|credential|credentials|value)?$/i.test(normalizedKey) ||
+    /^(?:credential|credentials)$/i.test(normalizedKey);
 }
 
 /**
@@ -221,12 +257,22 @@ export function sanitizeBody(body: any): any {
     for (const [key, value] of Object.entries(body)) {
       const lowerKey = key.toLowerCase();
 
-      // Check for sensitive keys
-      if (lowerKey.includes('password') ||
-          lowerKey.includes('secret') ||
-          lowerKey.includes('token') ||
-          lowerKey.includes('api_key') ||
-          lowerKey.includes('private')) {
+      // PaperFactory keeps extra as a JSON string for compatibility. Parse it
+      // as structured data here so text redaction cannot damage its escaping.
+      if (lowerKey === 'extra' && typeof value === 'string') {
+        try {
+          sanitized[key] = JSON.stringify(sanitizeBody(JSON.parse(value)));
+          continue;
+        } catch {
+          // Treat non-JSON extra values as ordinary strings below.
+        }
+      }
+
+      // `requiresApiKey` is a typed capability flag, not a credential value.
+      // Preserve it so status compatibility does not turn false into a string.
+      const isTypedCapabilityFlag = lowerKey === 'requiresapikey' && typeof value === 'boolean';
+      // Check for sensitive keys without treating bibliographic "authors" as auth data.
+      if (isSensitiveBodyKey(lowerKey) && !isTypedCapabilityFlag) {
         sanitized[key] = '***REDACTED***';
       } else {
         sanitized[key] = sanitizeBody(value);
@@ -235,14 +281,10 @@ export function sanitizeBody(body: any): any {
     return sanitized;
   }
 
-  // For strings, check if it looks like a token
+  // Structured values retain their type and exact contents unless their key
+  // provides credential context; paper identifiers may be long hashes.
   if (typeof body === 'string') {
-    if (body.match(/^(Bearer|Basic)\s+/i)) {
-      return body.replace(/\s+\S+/, ' ***REDACTED***');
-    }
-    if (body.match(/^[a-zA-Z0-9_-]{32,}$/)) {
-      return body.substring(0, 8) + '***';
-    }
+    return sanitizeSensitiveText(body);
   }
 
   return body;
@@ -256,17 +298,18 @@ export function sanitizeUrl(url: string): string {
 
   try {
     const urlObj = new URL(url);
+    let hasSensitiveParams = Boolean(urlObj.username || urlObj.password);
+    urlObj.username = '';
+    urlObj.password = '';
 
     // Remove sensitive query parameters
-    const sensitiveParams = ['api_key', 'apikey', 'token', 'secret', 'auth'];
-    let hasSensitiveParams = false;
-
-    sensitiveParams.forEach(param => {
-      if (urlObj.searchParams.has(param)) {
-        urlObj.searchParams.set(param, '***REDACTED***');
+    for (const [key] of urlObj.searchParams) {
+      const normalizedKey = key.toLowerCase().replace(/[-_]/g, '');
+      if (isSensitiveBodyKey(key) || normalizedKey === 'key') {
+        urlObj.searchParams.set(key, '***REDACTED***');
         hasSensitiveParams = true;
       }
-    });
+    }
 
     // If we modified parameters, add indicator
     if (hasSensitiveParams) {
@@ -437,16 +480,20 @@ export function validateQueryComplexity(
 export function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
-  message?: string
+  message?: string,
+  onTimeout?: () => void
 ): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    const timer = setTimeout(() => {
-      clearTimeout(timer);
+    timer = setTimeout(() => {
+      onTimeout?.();
       reject(new Error(message || `Operation timed out after ${ms}ms`));
     }, ms);
   });
 
-  return Promise.race([promise, timeout]);
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 /**
@@ -493,6 +540,7 @@ export default {
   sanitizeHeaders,
   sanitizeParams,
   sanitizeBody,
+  sanitizeSensitiveText,
   sanitizeUrl,
   sanitizeDoi,
   escapeQueryValue,

@@ -3,6 +3,8 @@
  * 支持多个学术平台的标准化数据格式
  */
 
+import { sanitizeBody } from '../utils/SecurityUtils.js';
+
 export interface Paper {
   // === 核心字段 ===
   /** 唯一标识符 (如 arXiv ID, PMID, DOI) */
@@ -88,7 +90,7 @@ export class PaperFactory {
       updatedDate: data.updatedDate,
       categories: data.categories || [],
       keywords: data.keywords || [],
-      citationCount: data.citationCount || 0,
+      citationCount: data.citationCount,
       references: data.references || [],
       journal: data.journal,
       volume: data.volume,
@@ -116,14 +118,14 @@ export class PaperFactory {
       updated_date: paper.updatedDate?.toISOString() || '',
       categories: paper.categories?.join('; ') || '',
       keywords: paper.keywords?.join('; ') || '',
-      citation_count: paper.citationCount || 0,
+      citation_count: paper.citationCount ?? null,
       references: paper.references?.join('; ') || '',
       journal: paper.journal || '',
       volume: paper.volume || '',
       issue: paper.issue || '',
       pages: paper.pages || '',
       year: paper.year || null,
-      extra: JSON.stringify(paper.extra || {})
+      extra: JSON.stringify(sanitizeBody(paper.extra || {}))
     };
   }
 

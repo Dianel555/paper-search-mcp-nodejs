@@ -8,11 +8,13 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
 
 ## ✨ Key Features
 
 - **🌍 14 Academic Platforms**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus, Crossref
+- **🧭 WoS Starter + Expanded**: Starter v2 by default; Expanded SR/FR and citation relationships only when explicitly selected
+- **🌐 Public-page access discovery**: optional ScrapingAnt Extended fetching for DOI publisher pages; never used for Clarivate API or institutional login pages
 - **🔗 MCP Protocol Integration**: Seamless integration with Claude Desktop and other AI assistants
 - **📊 Unified Data Model**: Standardized paper format across all platforms
 - **⚡ High-Performance Search**: Concurrent search with intelligent rate limiting
@@ -27,14 +29,14 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 |----------|--------|----------|-----------|-----------|---------|------------------|
 | **Crossref** | ✅ | ❌ | ❌ | ✅ | ❌ | Default search, extensive metadata coverage |
 | **arXiv** | ✅ | ✅ | ✅ | ❌ | ❌ | Physics/CS preprints |
-| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ Required | Multi-topic search, date sorting, year ranges |
+| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ Required | Starter v2 default; Expanded SR/FR and relations opt-in |
 | **PubMed** | ✅ | ❌ | ❌ | ❌ | 🟡 Optional | Biomedical literature |
-| **Google Scholar** | ✅ | ❌ | ❌ | ✅ | ❌ | Comprehensive academic search |
+| **Google Scholar** | ✅ | ❌ | ❌ | ✅ | ❌ | Direct parser or optional ScrapingAnt General endpoint |
 | **bioRxiv** | ✅ | ✅ | ✅ | ❌ | ❌ | Biology preprints |
 | **medRxiv** | ✅ | ✅ | ✅ | ❌ | ❌ | Medical preprints |
 | **Semantic Scholar** | ✅ | ✅ | ❌ | ✅ | 🟡 Optional | AI semantic search |
 | **IACR ePrint** | ✅ | ✅ | ✅ | ❌ | ❌ | Cryptography papers |
-| **Sci-Hub** | ✅ | ✅ | ❌ | ❌ | ❌ | Universal paper access via DOI |
+| **Sci-Hub** | Opt-in | Opt-in | ❌ | ❌ | ❌ | Controlled DOI-only HTML adapter; disabled by default |
 | **ScienceDirect** | ✅ | ❌ | ❌ | ✅ | ✅ Required | Elsevier's full-text database |
 | **Springer Nature** | ✅ | ✅* | ❌ | ❌ | ✅ Required | Dual API: Meta v2 & OpenAccess |
 | **Wiley** | ❌ | ✅ | ✅ | ❌ | ✅ Required | TDM API: DOI-based PDF download only |
@@ -48,8 +50,8 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 
 This project includes integrations that may have **legal, contractual (ToS), and ethical** constraints. You are responsible for ensuring your usage complies with applicable laws, institutional policies, and third‑party terms.
 
-- **Sci-Hub**: May provide access to copyrighted works without authorization in many jurisdictions. Use only when you have the legal right to access the content (e.g., open access, author‑provided copies, or licensed institutional access).
-- **Google Scholar**: This integration relies on automated fetching/parsing and may violate Google's Terms of Service or trigger blocking/rate limits. Prefer official APIs or metadata sources (e.g., Crossref, Semantic Scholar) when ToS compliance is required.
+- **Sci-Hub**: Disabled by default and limited to an unstable DOI/mirror adapter. It does not grant access rights; enable it only for content you are legally authorized to access.
+- **Google Scholar/ScrapingAnt**: Automated fetching may trigger blocking or contractual restrictions. ScrapingAnt is used only for public Scholar or publisher pages when configured, never for WoS login, SSO, MFA, or institutional subscription pages.
 
 ## 🚀 Quick Start
 
@@ -87,8 +89,34 @@ cp .env.example .env
 3. **Configure Environment Variables**
    ```bash
    # Edit .env file
-   WOS_API_KEY=your_actual_api_key_here
-   WOS_API_VERSION=v1
+   # Web of Science defaults to Starter v2 and uses WOS_API_KEY.
+   WOS_API_KEY=your_web_of_science_api_key
+   # Optional Expanded product key.
+   WOS_EXPANDED_API_KEY=your_expanded_key
+   WOS_STARTER_VERSION=v2
+   WOS_STARTER_RPS=1
+   WOS_STARTER_DAILY_LIMIT=50
+   WOS_EXPANDED_RPS=2
+   # Full Record records/day; 0 means unlimited local accounting.
+   WOS_EXPANDED_FULL_RECORD_BUDGET=0
+   WOS_EXPANDED_BASE_URL=https://api.clarivate.com/api/wos
+
+   # Optional public-page HTML fetching; never a WoS proxy.
+   # A key alone does not authorize paid retrieval; browser escalation is opt-in.
+   # Residential access is rejected; defaults are 50 credits/operation and 10/request.
+   SCRAPINGANT_API_KEY=
+   SCRAPINGANT_ENABLED=false
+   SCRAPINGANT_ALLOW_BROWSER_ESCALATION=false
+   SCRAPINGANT_MAX_CREDITS_PER_OPERATION=50
+   SCRAPINGANT_MAX_CREDITS_PER_REQUEST=10
+   SCRAPINGANT_MAX_CONCURRENCY=1
+   SCRAPINGANT_PROXY_TYPE=datacenter
+
+   # Controlled Sci-Hub adapter; disabled unless explicitly enabled.
+   SCIHUB_ENABLED=false
+   SCIHUB_FETCH_MODE=fallback
+   SCIHUB_MIRRORS=
+   SCIHUB_HEALTHCHECK_CONCURRENCY=3
    
    # PubMed API key (optional, recommended for better performance)
    PUBMED_API_KEY=your_ncbi_api_key_here
@@ -96,8 +124,10 @@ cp .env.example .env
    # Semantic Scholar API key (optional, increases rate limits)
    SEMANTIC_SCHOLAR_API_KEY=your_semantic_scholar_api_key
    
-   # Elsevier API key (required for ScienceDirect and Scopus)
+   # Elsevier API key: ScienceDirect Search v2 and Scopus details
    ELSEVIER_API_KEY=your_elsevier_api_key
+   # Optional dedicated key for Scopus Search API; falls back to ELSEVIER_API_KEY
+   SCOPUS_SEARCH_API_KEY=
    
    # Springer Nature API keys (required for Springer)
    SPRINGER_API_KEY=your_springer_api_key  # For Metadata API v2
@@ -139,7 +169,9 @@ Add the following configuration to your Claude Desktop config file:
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-#### NPX Configuration (Recommended)
+#### Complete NPX Configuration (Recommended)
+The following is a complete MCP configuration. Every value in `env` must be a string; leave optional keys empty when that platform is not enabled. Replace every placeholder with a value from your own environment, and never commit real credentials.
+
 ```json
 {
   "mcpServers": {
@@ -147,25 +179,55 @@ Add the following configuration to your Claude Desktop config file:
       "command": "npx",
       "args": ["-y", "paper-search-mcp-nodejs"],
       "env": {
-        "WOS_API_KEY": "your_web_of_science_api_key"
+        "NODE_ENV": "production",
+        "LOG_LEVEL": "info",
+        "WOS_API_KEY": "your_web_of_science_api_key",
+        "WOS_STARTER_VERSION": "v2",
+        "WOS_STARTER_RPS": "1",
+        "WOS_STARTER_DAILY_LIMIT": "50",
+        "WOS_EXPANDED_API_KEY": "",
+        "WOS_EXPANDED_RPS": "2",
+        "WOS_EXPANDED_FULL_RECORD_BUDGET": "0",
+        "WOS_EXPANDED_BASE_URL": "https://api.clarivate.com/api/wos",
+        "PUBMED_API_KEY": "",
+        "SEMANTIC_SCHOLAR_API_KEY": "",
+        "ELSEVIER_API_KEY": "",
+        "SCOPUS_SEARCH_API_KEY": "",
+        "SPRINGER_API_KEY": "",
+        "SPRINGER_OPENACCESS_API_KEY": "",
+        "WILEY_TDM_TOKEN": "",
+        "CROSSREF_MAILTO": "you@example.com",
+        "SCRAPINGANT_API_KEY": "",
+        "SCRAPINGANT_ENABLED": "false",
+        "SCRAPINGANT_ALLOW_BROWSER_ESCALATION": "false",
+        "SCRAPINGANT_MAX_CREDITS_PER_OPERATION": "50",
+        "SCRAPINGANT_MAX_CREDITS_PER_REQUEST": "10",
+        "SCRAPINGANT_MAX_CONCURRENCY": "1",
+        "SCRAPINGANT_PROXY_TYPE": "datacenter",
+        "SCHOLAR_PROXY": "http://user:password@proxy.example:8080",
+        "SCIHUB_ENABLED": "false",
+        "SCIHUB_FETCH_MODE": "fallback",
+        "SCIHUB_MIRRORS": "",
+        "SCIHUB_HEALTHCHECK_CONCURRENCY": "3",
+        "DEFAULT_DOWNLOAD_PATH": "./downloads",
+        "MAX_FILE_SIZE_MB": "100",
+        "RATE_LIMIT_REQUESTS_PER_MINUTE": "60",
+        "RATE_LIMIT_BURST": "10"
       }
     }
   }
 }
 ```
 
+Replace the `SCHOLAR_PROXY` placeholder with an authorized proxy, or remove that entry when the process already inherits `HTTPS_PROXY`/`HTTP_PROXY`. `WOS_EXPANDED_API_KEY`, `SCRAPINGANT_API_KEY`, and the other optional keys may remain empty.
+
 #### Local Installation Configuration
+For a local build, keep the complete `env` object above and change only the server command:
+
 ```json
 {
-  "mcpServers": {
-    "paper_search_nodejs": {
-      "command": "node",
-      "args": ["/path/to/paper-search-mcp-nodejs/dist/server.js"],
-      "env": {
-        "WOS_API_KEY": "your_web_of_science_api_key"
-      }
-    }
-  }
+  "command": "node",
+  "args": ["/path/to/paper-search-mcp-nodejs/dist/server.js"]
 }
 ```
 
@@ -234,9 +296,19 @@ Search Web of Science database specifically
 ```typescript
 search_webofscience({
   query: "CRISPR gene editing",
-  maxResults: 15,
+  maxResults: 5,
   year: "2022",
-  journal: "Nature"
+  journal: "Nature",
+  apiProduct: "expanded",   // omit for Starter v2
+  recordView: "short",      // expanded only; "full" is opt-in
+  discoverAccess: true,      // optional publisher public-page discovery
+  discoverAccessMaxItems: 5  // explicit bound; default is 5, range 1-100
+})
+
+get_webofscience_related_records({
+  uid: "WOS:000000000000001",
+  relation: "citing",       // references, citing, or related
+  maxResults: 50
 })
 ```
 
@@ -311,9 +383,10 @@ search_iacr({
 ```
 
 ### `search_scihub`
-Search and download papers from Sci-Hub using DOI or paper URL
+Controlled, opt-in Sci-Hub DOI lookup/download; disabled by default and not an official API
 
 ```typescript
+// Requires SCIHUB_ENABLED=true. DOI/doi.org inputs only.
 search_scihub({
   doiOrUrl: "10.1038/nature12373",
   downloadPdf: true,
@@ -390,6 +463,16 @@ get_paper_by_doi({
 })
 ```
 
+### `discover_paper_access`
+Discover one public publisher PDF candidate by DOI. This does not claim open-license status or complete download success; PDF verification is opt-in and bounded.
+
+```typescript
+discover_paper_access({
+  doi: "https://doi.org/10.1038/s41586-023-12345-6",
+  verifyPdf: false
+})
+```
+
 ### `get_platform_status`
 Check platform status and API keys
 
@@ -451,6 +534,8 @@ src/
 │   └── searchers.ts          # Searcher initialization
 ├── utils/
 │   ├── SecurityUtils.ts      # DOI validation, query sanitization, injection prevention
+│   ├── PublicNetwork.ts      # Public-target DNS/redirect and SSRF checks
+│   ├── ConcurrencyLimiter.ts # Dependency-free bounded concurrency
 │   ├── ErrorHandler.ts       # Unified error handling with retry logic
 │   ├── RateLimiter.ts        # Token bucket rate limiting
 │   ├── QuotaManager.ts       # Daily quota tracking
@@ -460,7 +545,12 @@ src/
 ├── config/
 │   └── constants.ts          # Timeouts, endpoints, limits
 ├── services/
-│   └── CitationService.ts    # Citation fetching service
+│   ├── CitationService.ts             # Citation fetching service
+│   ├── WebOfScienceParser.ts          # Starter/Expanded response parsers
+│   ├── WebOfScienceRequestService.ts  # WoS retry, rate, quota, and status
+│   ├── PublicHttpClient.ts            # Redirect-checked public HTTP
+│   ├── ScrapingAntFetcher.ts          # General/Extended HTML API wrapper
+│   └── PublicAccessDiscovery.ts       # DOI publisher-page PDF discovery
 └── server.ts                 # MCP server main file
 ```
 
@@ -495,15 +585,15 @@ npm run format
 ```
 
 **Test Coverage:**
-- 19 test suites, 158 test cases
-- All 13 platform searchers tested
+- Includes WoS HTTP contracts, ScrapingAnt status/credits, public-target SSRF checks, access discovery, Sci-Hub fallback/PDF validation, and MCP schemas.
+- Platform searchers covered by unit and contract tests
 - Security utilities (DOI validation, query sanitization)
 - ErrorHandler (error classification, retry logic)
 - Rate limiting integration, QuotaManager, RequestCache
 
 | Test Suite | Coverage |
 |------------|----------|
-| Platform Searchers | 13/13 ✅ |
+| Platform Searchers | ✅ |
 | SecurityUtils | ✅ |
 | ErrorHandler | ✅ |
 | RateLimiter & Integration | ✅ |
@@ -544,14 +634,21 @@ search_springer({
 
 ### Web of Science Advanced Search
 
-🎯 **WoS Starter API v1/v2 Support**: Uses Clarivate's WoS Starter API with full field tag support.
+🎯 **WoS Starter + Expanded**: Starter API v2 is the default and v1 remains an explicit compatibility choice. Expanded must be selected explicitly.
 
-**API Version Configuration:**
+**API Version and product configuration:**
 ```bash
-# In .env file (default: v1)
-WOS_API_VERSION=v1   # Stable, recommended
-# WOS_API_VERSION=v2  # Newer version, same endpoints
+# Starter version (default: v2; fixed for the process)
+WOS_STARTER_VERSION=v2
+# WOS_STARTER_VERSION=v1
+
+# Web of Science defaults to Starter v2.
+WOS_API_KEY=...
+# Optional Expanded product key.
+WOS_EXPANDED_API_KEY=...
 ```
+
+Starter requests use the documented `/documents` endpoints, page at most 50 records, and preserve unknown citation counts as `null`. Expanded uses its separate `/api/wos` contract, defaults to Short Record, and supports Full Record, references, citing, and related-record operations only when requested. The default is the current Swagger server `https://api.clarivate.com/api/wos`; older `wos-api.clarivate.com` guidance is not used.
 
 ```typescript
 // Multi-topic search
@@ -588,17 +685,20 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.2.7 Improvements:**
+**🔧 v0.3.0 Improvements:**
 
-- ✅ **Google Scholar**: Major anti-detection overhaul — session management, cookie persistence, 429/captcha detection with auto-retry, adaptive delay, and proxy support (`SCHOLAR_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`)
+- ✅ **Google Scholar**: Isolated same-origin session, 429/captcha detection, bounded transport fallback, adaptive delay, and proxy support (`SCHOLAR_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`)
 - ✅ **arXiv**: Fixed search query prefix (`all:`) to comply with arXiv API spec
 - ✅ **Google Scholar**: Updated User-Agents to latest browser versions (Chrome 131, Firefox 133, Edge 131)
 - ✅ **Performance**: Implemented `RequestCache` for caching search results and API responses
 - ✅ **Reliability**: Added `RateLimiter` and `QuotaManager` to prevent API abuse and 429 errors
 - ✅ **New Features**: Added `CitationService` and `PDFExtractor` for future enhancements
 - ✅ **Testing**: Restructured test suite into `tests/platforms`, `tests/utils`, and `tests/integration`
+- ✅ **WoS contracts**: Separate Starter v1/v2 and Expanded SR/FR/reference request and response handling
+- ✅ **Quota safety**: Per-attempt throttling, concurrent reservations, Full Record budget tracking, and quota-header status
+- ✅ **Public access discovery**: DOI redirect validation and bounded ScrapingAnt publisher-page discovery (opt-in)
+- ✅ **Shared services**: Parsing and WoS request mechanics moved out of platform-specific public files
 - ✅ **18 Field Tags**: Full support for all WoS Starter API field tags
-- ✅ **API Version Selection**: Support for both v1 and v2 endpoints
 - ✅ **Enhanced Filtering**: ISSN, Volume, Page, Issue, DocType, PMID filters
 - ✅ **Query Validation**: Security checks for query complexity and injection prevention
 
@@ -607,9 +707,13 @@ search_webofscience({
 - `year`: Single year "2023" or range "2020-2023"
 - `author`: Author name filtering
 - `journal`: Journal/source filtering
-- `sortBy`: Sort field (`date`, `citations`, `relevance`, `title`, `author`, `journal`)
+- `sortBy`: Supported sort field (`date`, `citations`, `relevance`)
 - `sortOrder`: Sort direction (`asc`, `desc`)
-- `maxResults`: Maximum results (1-50 per page)
+- `maxResults`: Maximum results (1-100; Starter fetches 50 per page)
+- `apiProduct`: `starter` (default) or explicit `expanded`
+- `recordView`: Expanded `short` (default) or explicit `full`
+- `discoverAccess`: Optional publisher public-page discovery
+- `discoverAccessMaxItems`: Discovery bound (1-100; explicit value, deployment default, then 5)
 
 **Supported WOS Field Tags (18 total):**
 | Tag | Description | Tag | Description |
@@ -649,16 +753,13 @@ export NODE_ENV=development
 
 ### Google Scholar Features
 
-- **Academic Paper Priority**: Automatically filters out books, prioritizes peer-reviewed papers
-- **Citation Data**: Provides citation counts and academic metrics
-- **Anti-Detection**: Smart request patterns to avoid blocking
-- **Session Management**: Cookie persistence across requests to mimic real browser behavior
-- **Adaptive Delay**: Dynamic backoff that increases on consecutive failures
-- **429/Captcha Detection**: Detects rate-limit and captcha responses, resets session and retries
-- **Proxy Support**: Optional HTTP/HTTPS/SOCKS proxy to bypass IP-based blocking
-- **Comprehensive Coverage**: Searches across all academic publishers
+- **HTML search adapter**: Uses the Scholar web page, not an official public API
+- **Metadata and citations**: Parses titles, authors, abstracts, publication years, and “Cited by” counts
+- **Bounded retrieval**: Requests at most 20 results across at most 10 pages with adaptive delays and bounded retry handling
+- **Provider-neutral transport**: Direct Scholar traffic keeps its isolated HTTPS/SOCKS proxy and same-origin session; ScrapingAnt is a static fallback only for network/server failures
+- **No full-text authorization**: PDF/library links remain publisher or institutional links
 
-> **Google Scholar Blocking**: Google aggressively blocks direct programmatic access by IP. If searches fail with rate-limit/captcha errors, configure a proxy via the `SCHOLAR_PROXY` environment variable (also falls back to `HTTPS_PROXY`/`HTTP_PROXY`):
+> **Google Scholar access**: Google’s official help says automated software should respect `robots.txt` and that bulk access is not provided. Direct requests use `SCHOLAR_PROXY` first, then standard proxy aliases (`HTTPS_PROXY`/`HTTP_PROXY`, including lowercase forms) when configured. With the default transport, the configured ScrapingAnt fetcher is used only as a backup for transport failures or upstream 5xx responses—not to bypass 403/429/CAPTCHA responses. If a separately authorized proxy is already configured, use `SCHOLAR_PROXY`:
 > ```bash
 > # HTTP/HTTPS proxy
 > SCHOLAR_PROXY=http://user:pass@host:port
@@ -674,14 +775,18 @@ export NODE_ENV=development
 - **Open Access PDFs**: Direct links to freely available papers
 - **Research Fields**: Filter by specific academic disciplines
 
+### ScrapingAnt Public Fetch Layer
+
+ScrapingAnt is an optional, paid public-page fallback: a key alone does not enable dispatch. Set `SCRAPINGANT_ENABLED=true` to opt in; browser escalation remains disabled unless `SCRAPINGANT_ALLOW_BROWSER_ESCALATION=true` is explicitly authorized. The local defaults are 50 credits per operation and 10 credits per request, and only `datacenter` proxy type is accepted; residential access is rejected. Google Scholar uses `/v2/general`, while WoS DOI access discovery and Sci-Hub fallback use `/v2/extended`. The layer is never a Clarivate/WoS API proxy. DOI discovery rejects known login/SSO/Clarivate targets before dispatch where the local redirect chain is visible. Local DNS checks cannot prove the remote proxy's own redirect destination, so a discovered link is not an OA, authorization, or copyright determination. Actual usage is taken from response credit headers; local budgets are not provider billing balances.
+
 ### Sci-Hub Features
 
-- **Universal Access**: Access papers using DOI or direct URLs
-- **Mirror Network**: Automatic detection and use of fastest available mirror (11+ mirrors)
-- **Health Monitoring**: Continuous monitoring of mirror site availability
-- **Automatic Failover**: Seamless switching between mirrors when one fails
-- **Smart Retry**: Automatic retry with different mirrors on failure
-- **Response Time Optimization**: Mirrors sorted by response time for best performance
+- **Opt-in only**: Disabled by default; accepts DOI, `doi:` and `doi.org` forms only
+- **Controlled fallback**: Direct mirror lookup first, then bounded ScrapingAnt Extended HTML fallback when enabled
+- **Health monitoring**: Five seeded mirrors, max three concurrent direct checks, cached and single-flight
+- **Explicit states**: Distinguishes not-found, blocked, markup-changed, unhealthy, and transport failures
+- **Safe PDF handling**: Public-target redirect checks, MIME/magic/size validation, temporary files, and atomic replacement
+- **Compliance notice**: Does not grant access rights or claim copyright/authorization status
 
 ## 📝 License
 

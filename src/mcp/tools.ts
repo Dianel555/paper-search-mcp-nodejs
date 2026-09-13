@@ -100,7 +100,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'search_webofscience',
-    description: 'Search academic papers from Web of Science database',
+    description: 'Search Web of Science Starter (default) or explicitly selected Expanded API',
     inputSchema: {
       type: 'object',
       properties: {
@@ -108,7 +108,8 @@ export const TOOLS: Tool[] = [
         maxResults: {
           type: 'number',
           minimum: 1,
-          maximum: 50,
+          maximum: 100,
+          default: 10,
           description: 'Maximum number of results to return'
         },
         year: { type: 'string', description: 'Publication year filter (e.g., "2023", "2020-2023")' },
@@ -116,16 +117,53 @@ export const TOOLS: Tool[] = [
         journal: { type: 'string', description: 'Journal name filter' },
         sortBy: {
           type: 'string',
-          enum: ['relevance', 'date', 'citations', 'title', 'author', 'journal'],
-          description: 'Sort results by field'
+          enum: ['relevance', 'date', 'citations'],
+          description: 'Starter-supported sort field'
         },
         sortOrder: {
           type: 'string',
           enum: ['asc', 'desc'],
           description: 'Sort order: ascending or descending'
+        },
+        apiProduct: {
+          type: 'string',
+          enum: ['starter', 'expanded'],
+          default: 'starter',
+          description: 'API product; Expanded must be selected explicitly'
+        },
+        recordView: {
+          type: 'string',
+          enum: ['short', 'full'],
+          description: 'Expanded record detail; defaults to short'
+        },
+        discoverAccess: {
+          type: 'boolean',
+          default: false,
+          description: 'Find public publisher PDF links using controlled direct retrieval and optional paid fallback'
+        },
+        discoverAccessMaxItems: {
+          type: 'number',
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum result items to enrich; defaults to ACCESS_DISCOVERY_MAX_ITEMS or 5'
         }
       },
       required: ['query']
+    }
+  },
+  {
+    name: 'get_webofscience_related_records',
+    description: 'Get references, citing records, or related records through Web of Science Expanded API',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uid: { type: 'string', description: 'Web of Science UID' },
+        relation: { type: 'string', enum: ['references', 'citing', 'related'] },
+        maxResults: { type: 'number', minimum: 1, maximum: 100, default: 50 },
+        firstRecord: { type: 'number', minimum: 1, maximum: 100000, default: 1 },
+        recordView: { type: 'string', enum: ['short', 'full'], description: 'Not accepted for references' }
+      },
+      required: ['uid', 'relation']
     }
   },
   {
@@ -312,15 +350,34 @@ export const TOOLS: Tool[] = [
     }
   },
   {
+    name: 'discover_paper_access',
+    description: 'Discover a public publisher PDF candidate for one DOI without claiming open-license or complete download success',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doi: {
+          type: 'string',
+          description: 'A DOI, doi: prefix, or doi.org URL; arbitrary HTTP URLs are rejected'
+        },
+        verifyPdf: {
+          type: 'boolean',
+          default: false,
+          description: 'Optionally perform a bounded direct PDF prefix probe'
+        }
+      },
+      required: ['doi']
+    }
+  },
+  {
     name: 'search_scihub',
     description:
-      'Search and download papers from Sci-Hub using DOI or paper URL. Automatically detects and uses the fastest available mirror.',
+      'Controlled, opt-in Sci-Hub DOI adapter (disabled by default); accepts DOI/doi.org URLs only, tries direct mirrors before bounded ScrapingAnt fallback, and does not grant access rights.',
     inputSchema: {
       type: 'object',
       properties: {
         doiOrUrl: {
           type: 'string',
-          description: 'DOI (e.g., "10.1038/nature12373") or full paper URL'
+          description: 'DOI or doi.org URL only (e.g., "10.1038/nature12373"); ordinary paper URLs are rejected'
         },
         downloadPdf: {
           type: 'boolean',

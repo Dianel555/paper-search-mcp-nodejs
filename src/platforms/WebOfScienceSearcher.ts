@@ -1,153 +1,478 @@
 /**
- * Web of Science API集成模块
- * 支持 Web of Science Starter API 和 Web of Science Researcher API
+ * Web of Science integration.
+ *
+ * Starter and Expanded use separate internal clients because their URLs,
+ * parameters, quotas, and response documents are not interchangeable. The
+ * historical PaperSource facade remains the only platform module; response
+ * parsing lives in services/WebOfScienceParser.ts and throttling/quotas use the
+ * shared utils implementations.
  */
 
-import axios, { AxiosResponse } from 'axios';
+import { type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import { Paper, PaperFactory } from '../models/Paper.js';
-import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } from './PaperSource.js';
-import { escapeQueryValue, validateQueryComplexity, withTimeout } from '../utils/SecurityUtils.js';
-import { RateLimiter } from '../utils/RateLimiter.js';
-import { ErrorHandler } from '../utils/ErrorHandler.js';
-import { QuotaManager } from '../utils/QuotaManager.js';
-import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
-import { logDebug, logWarn } from '../utils/Logger.js';
+import { PaperSource, type SearchOptions, type DownloadOptions, type PlatformCapabilities } from './PaperSource.js';
+import { CapabilityUnavailableError } from '../utils/CapabilityErrors.js';
+import { ApiError } from '../utils/ErrorHandler.js';
+import { QuotaManager, type QuotaReservation } from '../utils/QuotaManager.js';
+import { type RateLimiter } from '../utils/RateLimiter.js';
+import { PublicAccessDiscovery } from '../services/PublicAccessDiscovery.js';
+import { type RetrievalProcessStatus, type RetrievalService } from '../retrieval/RetrievalService.js';
+import { createRetrievalService } from '../retrieval/createRetrievalService.js';
+import { isValidAccessDiscoveryMaxItems, parseRetrievalConfiguration } from '../retrieval/Configuration.js';
+import { WebOfScienceRequestService, type WosHttpRequester } from '../services/WebOfScienceRequestService.js';
+import { API_ENDPOINTS } from '../config/constants.js';
+import {
+  parseExpandedRecord,
+  parseExpandedRecords,
+  parseQueryResult,
+  parseReferences,
+  parseStarterRecord,
+  type StarterRecord,
+  type StarterResponse,
+  type WosQueryResult,
+  type WosRecordView,
+  type WosReference,
+  type WosRelation,
+  type WosRelationResult
+} from '../services/WebOfScienceParser.js';
+import { escapeQueryValue, sanitizeDoi, validateQueryComplexity } from '../utils/SecurityUtils.js';
 
-interface WoSSearchOptions extends SearchOptions {
-  /** 数据库选择 */
-  databases?: string[];
-  /** 文档类型过滤 (Article, Review, etc.) */
-  documentTypes?: string[];
-  /** 语言过滤 */
-  languages?: string[];
-  /** ISSN/ISBN过滤 */
+export type { WosRecordView, WosReference, WosRelation, WosRelationResult, WosQueryResult } from '../services/WebOfScienceParser.js';
+export { CapabilityUnavailableError } from '../utils/CapabilityErrors.js';
+
+export interface WoSSearchOptions extends SearchOptions {
+  apiProduct?: 'starter' | 'expanded';
+  recordView?: WosRecordView;
+  discoverAccess?: boolean;
+  discoverAccessMaxItems?: number;
+  databaseId?: string;
+  edition?: string;
   issn?: string;
-  /** 卷号过滤 */
   volume?: string;
-  /** 页码过滤 */
   page?: string;
-  /** 期号过滤 */
   issue?: string;
-  /** PubMed ID过滤 */
+  documentTypes?: string[];
+  languages?: string[];
   pmid?: string;
-  /** DOI过滤 */
   doi?: string;
 }
 
-interface WoSApiResponse {
-  metadata: {
-    total: number;
-    page: number;
-    limit: number;
-  };
-  hits: WoSRecord[];
+export interface WebOfScienceSearcherOptions {
+  starterApiKey?: string;
+  expandedApiKey?: string;
+  httpClient?: WosHttpRequester;
+  rateLimiter?: Pick<RateLimiter, 'waitForPermission' | 'getStatus'>;
+  starterRateLimiter?: Pick<RateLimiter, 'waitForPermission' | 'getStatus'>;
+  expandedRateLimiter?: Pick<RateLimiter, 'waitForPermission' | 'getStatus'>;
+  quotaManager?: QuotaManager;
+  sleep?: (milliseconds: number) => Promise<void>;
+  random?: () => number;
+  maxRetries?: number;
+  retrievalService?: RetrievalService;
+  publicAccessDiscovery?: PublicAccessDiscovery;
+  expandedBaseUrl?: string;
 }
 
-interface WoSRecord {
-  /** 唯一标识符 */
-  uid: string;
-  /** 标题 */
-  title: string;
-  /** 文档类型 */
-  types: string[];
-  /** 来源类型 */
-  sourceTypes: string[];
-  /** 来源信息 */
-  source: {
-    sourceTitle: string;
-    publishYear: number;
-    publishMonth?: string;
-    volume?: string;
-    issue?: string;
-    pages?: string;
-  };
-  /** 作者信息 */
-  names?: {
-    authors?: Array<{
-      displayName: string;
-    }>;
-  };
-  /** 摘要 */
-  abstract?: string;
-  /** DOI */
-  identifiers?: {
-    doi?: string;
-  };
-  /** 关键词 */
-  keywords?: {
-    authorKeywords?: string[];
-  };
-  /** 被引次数 */
-  citations?: Array<{
-    citingArticlesCount?: number;
-    count?: number;
-  }>;
+export type ApiKeyValidationStatus = 'valid' | 'invalid' | 'unknown' | 'missing' | 'configured';
+
+export interface WebOfScienceStatus {
+  starter: ReturnType<StarterClient['getStatus']> & { apiKeyStatus: ApiKeyValidationStatus };
+  expanded: ReturnType<ExpandedClient['getStatus']> & { apiKeyStatus: ApiKeyValidationStatus };
+  scrapingAnt: RetrievalProcessStatus;
+}
+
+interface WosClientOptions {
+  httpClient?: WosHttpRequester;
+  rateLimiter?: Pick<RateLimiter, 'waitForPermission' | 'getStatus'>;
+  quotaManager?: QuotaManager;
+  sleep?: (milliseconds: number) => Promise<void>;
+  random?: () => number;
+  maxRetries?: number;
+}
+
+/** Product-specific clients retain only endpoint and response-contract logic. */
+abstract class WosClient {
+  protected readonly requestService: WebOfScienceRequestService;
+  protected readonly quotaManager: QuotaManager;
+
+  protected constructor(
+    apiKey: string | undefined,
+    options: WosClientOptions,
+    rateLimitEnv: string,
+    defaultRps: number,
+    quotaPlatform: string,
+    quotaConfig: { dailyLimit: number; envPrefix?: string; envVar?: string }
+  ) {
+    this.quotaManager = options.quotaManager || QuotaManager.getInstance();
+    this.requestService = new WebOfScienceRequestService({
+      apiKey,
+      httpClient: options.httpClient,
+      rateLimiter: options.rateLimiter,
+      requestsPerSecondEnv: rateLimitEnv,
+      defaultRequestsPerSecond: defaultRps,
+      quotaManager: this.quotaManager,
+      quotaPlatform,
+      quotaConfig,
+      sleep: options.sleep,
+      random: options.random,
+      maxRetries: options.maxRetries
+    });
+  }
+
+  isConfigured(): boolean {
+    return this.requestService.isConfigured();
+  }
+
+  protected request<T = unknown>(config: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+    return this.requestService.request<T>(config);
+  }
+
+  protected getClientStatus(baseUrl: string) {
+    return this.requestService.getStatus(baseUrl);
+  }
+
+  protected keyStatusFromError(error: any): ApiKeyValidationStatus {
+    return this.requestService.getApiKeyStatus(error);
+  }
+}
+interface StarterClientSearchOptions {
+  maxResults?: number;
+  databaseId?: string;
+  edition?: string;
+  year?: string;
+  author?: string;
+  journal?: string;
+  issn?: string;
+  volume?: string;
+  page?: string;
+  issue?: string;
+  documentTypes?: string[];
+  pmid?: string;
+  doi?: string;
+  sortBy?: 'relevance' | 'date' | 'citations';
+  sortOrder?: 'asc' | 'desc';
+}
+
+class StarterClient extends WosClient {
+  private readonly version: 'v1' | 'v2';
+  private readonly baseUrl: string;
+
+  constructor(apiKey: string | undefined, version: string, options: WosClientOptions) {
+    const normalizedVersion = version.toLowerCase();
+    if (normalizedVersion !== 'v1' && normalizedVersion !== 'v2') {
+      throw new Error(`Unsupported Web of Science Starter API version: ${version}`);
+    }
+    super(apiKey, options, 'WOS_STARTER_RPS', 1, 'wos-starter', {
+      dailyLimit: 50,
+      envPrefix: 'WOS_STARTER'
+    });
+    this.version = normalizedVersion;
+    this.baseUrl = `${API_ENDPOINTS.WOS_STARTER}/${this.version}`;
+  }
+
+  getVersion(): 'v1' | 'v2' {
+    return this.version;
+  }
+
+  getStatus() {
+    return { ...this.getClientStatus(this.baseUrl), version: this.version };
+  }
+
+  async search(query: string, options: StarterClientSearchOptions = {}): Promise<Paper[]> {
+    this.requireKey();
+    const maxResults = normalizeResultCount(options.maxResults, 100, 'Starter');
+    const databaseId = options.databaseId || 'WOS';
+    const pageSize = Math.min(maxResults, 50);
+    const sortField = mapWosSortField(options.sortBy, options.sortOrder);
+    const params: Record<string, string | number> = {
+      q: buildWosQuery(query, options),
+      db: databaseId,
+      limit: pageSize,
+      page: 1
+    };
+    if (options.edition) params.edition = options.edition;
+    if (sortField) params.sortField = sortField;
+
+    const papers: Paper[] = [];
+    const seen = new Set<string>();
+    let page = 1;
+    while (papers.length < maxResults) {
+      const papersBeforePage = papers.length;
+      const response = await this.request<StarterResponse>({
+        method: 'GET',
+        url: `${this.baseUrl}/documents`,
+        params: { ...params, page }
+      });
+      const data = response.data || {};
+      const hits = Array.isArray(data.hits) ? data.hits : [];
+      for (const record of hits) {
+        if (!record?.uid || seen.has(record.uid)) continue;
+        seen.add(record.uid);
+        const paper = parseStarterRecord(record, databaseId, this.version);
+        if (paper) papers.push(paper);
+        if (papers.length >= maxResults) break;
+      }
+
+      const total = numberValue(data.metadata?.total);
+      if (hits.length === 0 || papers.length >= maxResults || papers.length === papersBeforePage ||
+          (total !== undefined && page * pageSize >= total) ||
+          (total === undefined && hits.length < pageSize)) break;
+      page++;
+    }
+    return papers.slice(0, maxResults);
+  }
+
+  async getByUid(uid: string): Promise<Paper | null> {
+    this.requireKey();
+    const response = await this.request<StarterRecord>({
+      method: 'GET',
+      url: `${this.baseUrl}/documents/${encodeURIComponent(uid)}`
+    });
+    return response.data?.uid ? parseStarterRecord(response.data, 'WOS', this.version) : null;
+  }
+
+  async getCitationCount(uid: string): Promise<number | undefined> {
+    return (await this.getByUid(uid))?.citationCount;
+  }
+
+  async validateApiKeyStatus(): Promise<ApiKeyValidationStatus> {
+    if (!this.isConfigured()) return 'missing';
+    try {
+      await this.search('TS=(test)', { maxResults: 1 });
+      return 'valid';
+    } catch (error) {
+      return this.keyStatusFromError(error);
+    }
+  }
+
+  private requireKey(): void {
+    if (!this.isConfigured()) throw new Error('Web of Science Starter API key is required');
+  }
+}
+
+interface ExpandedClientSearchOptions {
+  maxResults?: number;
+  firstRecord?: number;
+  databaseId?: string;
+  edition?: string;
+  recordView?: WosRecordView;
+  year?: string;
+  author?: string;
+  journal?: string;
+  issn?: string;
+  volume?: string;
+  page?: string;
+  issue?: string;
+  documentTypes?: string[];
+  pmid?: string;
+  doi?: string;
+  sortBy?: 'relevance' | 'date' | 'citations';
+  sortOrder?: 'asc' | 'desc';
+}
+
+interface ExpandedRelationOptions {
+  maxResults?: number;
+  firstRecord?: number;
+  recordView?: WosRecordView;
+  databaseId?: string;
+  edition?: string;
+  sortBy?: 'relevance' | 'date' | 'citations';
+  sortOrder?: 'asc' | 'desc';
+}
+
+class ExpandedClient extends WosClient {
+  private readonly baseUrl: string;
+  private readonly fullRecordQuota: QuotaManager;
+
+  constructor(apiKey: string | undefined, options: WosClientOptions & { baseUrl?: string }) {
+    super(apiKey, options, 'WOS_EXPANDED_RPS', 2, 'wos-expanded-requests', { dailyLimit: 0 });
+    this.baseUrl = (options.baseUrl || process.env.WOS_EXPANDED_BASE_URL || API_ENDPOINTS.WOS_EXPANDED).replace(/\/$/, '');
+    this.fullRecordQuota = options.quotaManager || QuotaManager.getInstance();
+    this.fullRecordQuota.registerPlatform('wos-expanded-full-record', {
+      dailyLimit: 0,
+      envVar: 'WOS_EXPANDED_FULL_RECORD_BUDGET'
+    });
+  }
+
+  getStatus() {
+    return {
+      ...this.getClientStatus(this.baseUrl),
+      fullRecordBudget: this.fullRecordQuota.getStatus('wos-expanded-full-record')
+    };
+  }
+
+  async search(query: string, options: ExpandedClientSearchOptions = {}): Promise<Paper[]> {
+    this.requireKey();
+    const count = normalizeResultCount(options.maxResults, 100, 'Expanded');
+    const recordView = options.recordView || 'short';
+    const databaseId = options.databaseId || 'WOS';
+    const response = await this.requestExpanded('/', {
+      databaseId,
+      usrQuery: buildWosQuery(query, options),
+      count,
+      firstRecord: normalizeFirstRecord(options.firstRecord),
+      optionView: recordView === 'full' ? 'FR' : 'SR',
+      ...(options.edition ? { edition: options.edition } : {}),
+      ...(mapWosSortField(options.sortBy, options.sortOrder) ? { sortField: mapWosSortField(options.sortBy, options.sortOrder) } : {})
+    }, recordView, count);
+    const queryResult = parseQueryResult(response.data);
+    return parseExpandedRecords(response.data)
+      .map(record => parseExpandedRecord(record, recordView, databaseId, queryResult))
+      .filter((paper): paper is Paper => paper !== null);
+  }
+
+  async getByUid(uid: string, recordView: WosRecordView = 'short', databaseId = 'WOS'): Promise<Paper | null> {
+    this.requireKey();
+    const response = await this.requestExpanded(`/id/${encodeURIComponent(uid)}`, {
+      databaseId,
+      optionView: recordView === 'full' ? 'FR' : 'SR'
+    }, recordView, 1);
+    const queryResult = parseQueryResult(response.data);
+    const record = parseExpandedRecords(response.data)[0];
+    return record ? parseExpandedRecord(record, recordView, databaseId, queryResult) : null;
+  }
+
+  async getQueryRecords(queryId: string | number, options: ExpandedClientSearchOptions = {}): Promise<Paper[]> {
+    this.requireKey();
+    const count = normalizeResultCount(options.maxResults, 100, 'Expanded');
+    const recordView = options.recordView || 'short';
+    const databaseId = options.databaseId || 'WOS';
+    const response = await this.requestExpanded(`/query/${encodeURIComponent(String(queryId))}`, {
+      count,
+      firstRecord: normalizeFirstRecord(options.firstRecord),
+      optionView: recordView === 'full' ? 'FR' : 'SR',
+      ...(mapWosSortField(options.sortBy, options.sortOrder) ? { sortField: mapWosSortField(options.sortBy, options.sortOrder) } : {})
+    }, recordView, count);
+    const queryResult = parseQueryResult(response.data);
+    return parseExpandedRecords(response.data)
+      .map(record => parseExpandedRecord(record, recordView, databaseId, queryResult))
+      .filter((paper): paper is Paper => paper !== null);
+  }
+
+  async getReferences(uid: string, options: Omit<ExpandedRelationOptions, 'recordView'> = {}): Promise<WosRelationResult<WosReference>> {
+    this.requireKey();
+    const count = normalizeRelationCount(options.maxResults);
+    const response = await this.requestExpanded('/references', {
+      databaseId: options.databaseId || 'WOS',
+      uniqueId: uid,
+      count,
+      firstRecord: normalizeFirstRecord(options.firstRecord),
+      ...(mapWosSortField(options.sortBy, options.sortOrder) ? { sortField: mapWosSortField(options.sortBy, options.sortOrder) } : {})
+    }, 'short', 0);
+    return { queryResult: parseQueryResult(response.data), items: parseReferences(response.data) };
+  }
+
+  async getCiting(uid: string, options: ExpandedRelationOptions = {}): Promise<WosRelationResult<Paper>> {
+    return this.getRelation('/citing', uid, options);
+  }
+
+  async getRelated(uid: string, options: ExpandedRelationOptions = {}): Promise<WosRelationResult<Paper>> {
+    return this.getRelation('/related', uid, options);
+  }
+
+  async validateApiKeyStatus(): Promise<ApiKeyValidationStatus> {
+    if (!this.isConfigured()) return 'missing';
+    try {
+      await this.search('TS=(test)', { maxResults: 1, recordView: 'short' });
+      return 'valid';
+    } catch (error) {
+      return this.keyStatusFromError(error);
+    }
+  }
+
+  private async getRelation(endpoint: '/citing' | '/related', uid: string, options: ExpandedRelationOptions): Promise<WosRelationResult<Paper>> {
+    this.requireKey();
+    const count = normalizeRelationCount(options.maxResults);
+    const recordView = options.recordView || 'short';
+    const databaseId = options.databaseId || 'WOS';
+    const response = await this.requestExpanded(endpoint, {
+      databaseId,
+      uniqueId: uid,
+      count,
+      firstRecord: normalizeFirstRecord(options.firstRecord),
+      optionView: recordView === 'full' ? 'FR' : 'SR',
+      ...(options.edition ? { edition: options.edition } : {}),
+      ...(mapWosSortField(options.sortBy, options.sortOrder) ? { sortField: mapWosSortField(options.sortBy, options.sortOrder) } : {})
+    }, recordView, count);
+    const queryResult = parseQueryResult(response.data);
+    return {
+      queryResult,
+      items: parseExpandedRecords(response.data)
+        .map(record => parseExpandedRecord(record, recordView, databaseId, queryResult))
+        .filter((paper): paper is Paper => paper !== null)
+    };
+  }
+
+  private async requestExpanded(
+    endpoint: string,
+    params: Record<string, string | number>,
+    recordView: WosRecordView,
+    requestedRecords: number
+  ): Promise<AxiosResponse<any>> {
+    let reservation: QuotaReservation | undefined;
+    if (recordView === 'full' && requestedRecords > 0) {
+      // Reserve synchronously before the first await so concurrent Full Record
+      // calls cannot all pass the same local budget check.
+      reservation = this.fullRecordQuota.reserve('wos-expanded-full-record', requestedRecords);
+    }
+
+    try {
+      const response = await this.request({
+        method: 'GET',
+        url: `${this.baseUrl}${endpoint}`,
+        params
+      });
+      if (reservation) {
+        this.fullRecordQuota.commit(reservation, parseExpandedRecords(response.data).length);
+        reservation = undefined;
+      }
+      return response;
+    } catch (error) {
+      if (reservation) this.fullRecordQuota.release(reservation);
+      throw error;
+    }
+  }
+
+  private requireKey(): void {
+    if (!this.isConfigured()) throw new Error('Web of Science Expanded API key is required');
+  }
 }
 
 export class WebOfScienceSearcher extends PaperSource {
-  private apiUrl: string;
-  private apiVersion: string;
-  private fallbackAttempted: boolean = false;
-  private readonly preferredVersion: string;
-  private readonly rateLimiter: RateLimiter;
-  private readonly quotaManager: QuotaManager;
+  private readonly starterClient: StarterClient;
+  private readonly expandedClient: ExpandedClient;
+  private readonly retrievalService: RetrievalService;
+  private readonly accessDiscovery: PublicAccessDiscovery;
+  private readonly accessDiscoveryMaxItems: number;
 
-  constructor(apiKey?: string, apiVersion?: string) {
-    super('webofscience', 'https://api.clarivate.com/apis', apiKey);
-    // Priority: constructor param > env var > default 'v2'
-    this.preferredVersion = apiVersion || process.env.WOS_API_VERSION || 'v2';
-    this.apiVersion = this.preferredVersion;
-    this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
+  constructor(apiKey?: string, apiVersion?: string, options: WebOfScienceSearcherOptions = {}) {
+    const starterApiKey = firstConfigured(options.starterApiKey, apiKey, process.env.WOS_API_KEY);
+    const expandedApiKey = firstConfigured(options.expandedApiKey, process.env.WOS_EXPANDED_API_KEY);
+    super('webofscience', 'https://api.clarivate.com/apis', starterApiKey || expandedApiKey);
 
-    const rpsEnv = Number(process.env.WOS_RPS);
-    const requestsPerSecond = Number.isFinite(rpsEnv) && rpsEnv > 0 ? rpsEnv : 5;
-    const burstEnv = Number(process.env.WOS_BURST);
-    const burstCapacity = Number.isFinite(burstEnv) && burstEnv > 0 ? burstEnv : requestsPerSecond;
-    this.rateLimiter = new RateLimiter({
-      requestsPerSecond,
-      burstCapacity,
-      debug: process.env.NODE_ENV === 'development'
+    const version = apiVersion || process.env.WOS_STARTER_VERSION || process.env.WOS_API_VERSION || 'v2';
+    const commonClientOptions: WosClientOptions = {
+      httpClient: options.httpClient,
+      quotaManager: options.quotaManager,
+      sleep: options.sleep,
+      random: options.random,
+      maxRetries: options.maxRetries
+    };
+    this.starterClient = new StarterClient(starterApiKey, version, {
+      ...commonClientOptions,
+      rateLimiter: options.starterRateLimiter || options.rateLimiter
     });
-
-    this.quotaManager = QuotaManager.getInstance();
-    this.quotaManager.registerPlatform('webofscience', {
-      dailyLimit: 5000,
-      envPrefix: 'WOS'
+    this.expandedClient = new ExpandedClient(expandedApiKey, {
+      ...commonClientOptions,
+      rateLimiter: options.expandedRateLimiter || options.rateLimiter,
+      baseUrl: options.expandedBaseUrl
     });
-
-    logDebug(`WoS API URL: ${this.apiUrl} (preferred: ${this.preferredVersion})`);
-  }
-
-  /**
-   * Switch to fallback API version (v2 -> v1 or v1 -> v2)
-   */
-  private switchToFallbackVersion(): boolean {
-    if (this.fallbackAttempted) {
-      return false; // Already tried fallback
-    }
-    
-    const fallbackVersion = this.apiVersion === 'v2' ? 'v1' : 'v2';
-    logWarn(`WoS API ${this.apiVersion} failed, switching to ${fallbackVersion}`);
-    
-    this.apiVersion = fallbackVersion;
-    this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
-    this.fallbackAttempted = true;
-    
-    return true;
-  }
-
-  /**
-   * Reset fallback state (call after successful request)
-   * This allows the next request to try the preferred version first
-   */
-  private resetFallbackState(): void {
-    // Always reset on success, so next request can try preferred version
-    if (this.fallbackAttempted && this.apiVersion !== this.preferredVersion) {
-      // We're on fallback version, schedule return to preferred on next request
-      this.fallbackAttempted = false;
-      this.apiVersion = this.preferredVersion;
-      this.apiUrl = `${this.baseUrl}/wos-starter/${this.apiVersion}`;
-    }
+    const retrievalConfiguration = parseRetrievalConfiguration();
+    this.accessDiscoveryMaxItems = retrievalConfiguration.accessDiscoveryMaxItems;
+    this.retrievalService = options.retrievalService || createRetrievalService({
+      configuration: retrievalConfiguration
+    });
+    this.accessDiscovery = options.publicAccessDiscovery || new PublicAccessDiscovery(this.retrievalService);
   }
 
   getCapabilities(): PlatformCapabilities {
@@ -157,477 +482,301 @@ export class WebOfScienceSearcher extends PaperSource {
       fullText: false,
       citations: true,
       requiresApiKey: true,
-      supportedOptions: ['maxResults', 'year', 'author', 'journal', 'sortBy', 'sortOrder']
+      supportedOptions: [
+        'maxResults', 'year', 'author', 'journal', 'sortBy', 'sortOrder',
+        'apiProduct', 'recordView', 'discoverAccess', 'discoverAccessMaxItems'
+      ] as any
     };
   }
 
-  /**
-   * 获取论文的参考文献ID列表
-   */
-  async getReferenceIds(uid: string): Promise<string[]> {
-    if (!this.apiKey) return [];
-
-    try {
-      const response = await this.makeApiRequest(`/documents/${uid}/references`, {
-        method: 'GET',
-        params: {
-          db: 'WOS',
-          limit: 50
-        }
-      });
-
-      const hits = response.data?.hits || [];
-      return hits.map((hit: any) => hit.uid).filter(Boolean);
-    } catch (error) {
-      logDebug(`Error getting reference IDs for UT ${uid}:`, error);
-      return [];
-    }
+  hasApiKey(): boolean {
+    return this.starterClient.isConfigured() || this.expandedClient.isConfigured();
   }
 
-  /**
-   * 获取引用此论文的文献ID列表
-   */
-  async getCitationIds(uid: string): Promise<string[]> {
-    if (!this.apiKey) return [];
-
-    try {
-      const response = await this.makeApiRequest(`/documents/${uid}/citing`, {
-        method: 'GET',
-        params: {
-          db: 'WOS',
-          limit: 100
-        }
-      });
-
-      const hits = response.data?.hits || [];
-      return hits.map((hit: any) => hit.uid).filter(Boolean);
-    } catch (error) {
-      logDebug(`Error getting citation IDs for UT ${uid}:`, error);
-      return [];
-    }
-  }
-
-  /**
-   * 获取论文详情（包含references和citations ID列表）
-   */
-  async getPaperWithCitations(uid: string): Promise<Paper | null> {
-    try {
-      const query = uid.includes('/') ? `DO="${uid}"` : `UT="${uid}"`;
-      const results = await this.search(query, { maxResults: 1 });
-      
-      if (results.length === 0) return null;
-      
-      const paper = results[0];
-      const paperUid = paper.extra?.uid;
-      
-      if (paperUid) {
-        const [refIds, citIds] = await Promise.all([
-          this.getReferenceIds(paperUid),
-          this.getCitationIds(paperUid)
-        ]);
-        
-        paper.references = refIds;
-        paper.extra = {
-          ...paper.extra,
-          citationIds: citIds
-        };
-      }
-      
-      return paper;
-    } catch (error) {
-      logDebug('Error getting paper with citations:', error);
-      return null;
-    }
-  }
-
-  /**
-   * 搜索Web of Science论文
-   */
   async search(query: string, options: WoSSearchOptions = {}): Promise<Paper[]> {
-    if (!this.apiKey) {
-      throw new Error('Web of Science API key is required');
+    const product = options.apiProduct || 'starter';
+    if (product === 'starter' && options.recordView !== undefined) {
+      throw new Error('recordView is only supported when apiProduct is expanded');
     }
+    if (options.discoverAccess && options.discoverAccessMaxItems !== undefined && !isValidAccessDiscoveryMaxItems(options.discoverAccessMaxItems)) {
+      throw new Error('discoverAccessMaxItems must be an integer between 1 and 100');
+    }
+    this.requireProduct(product);
 
     try {
-      const searchParams = this.buildSearchQuery(query, options);
-      const response = await this.makeApiRequest('/documents', {
-        method: 'GET',
-        params: searchParams
-      });
-
-      return this.parseSearchResponse(response.data);
-    } catch (error) {
-      this.handleHttpError(error, 'search');
-    }
-  }
-
-  /**
-   * Web of Science 通常不支持直接PDF下载
-   */
-  async downloadPdf(paperId: string, options?: DownloadOptions): Promise<string> {
-    throw new Error('Web of Science does not support direct PDF download. Please use the DOI or URL to access the paper through the publisher.');
-  }
-
-  /**
-   * Web of Science 通常不提供全文内容
-   */
-  async readPaper(paperId: string, options?: DownloadOptions): Promise<string> {
-    throw new Error('Web of Science does not provide full-text content. Only bibliographic metadata and abstracts are available.');
-  }
-
-  /**
-   * 根据DOI获取论文详细信息
-   */
-  async getPaperByDoi(doi: string): Promise<Paper | null> {
-    try {
-      const query = `DO="${doi}"`;
-      const results = await this.search(query, { maxResults: 1 });
-      return results.length > 0 ? results[0] : null;
-    } catch (error) {
-      logDebug('Error getting paper by DOI from Web of Science:', error);
-      return null;
-    }
-  }
-
-  /**
-   * 获取论文被引统计
-   */
-  async getCitationCount(paperId: string): Promise<number> {
-    if (!this.apiKey) {
-      throw new Error('Web of Science API key is required');
-    }
-
-    try {
-      const response = await this.makeApiRequest(`/documents/${paperId}`, {
-        method: 'GET'
-      });
-
-      const record = response.data?.Data?.[0];
-      const citationData = record?.dynamic_data?.citation_related?.tc_list?.silo_tc;
-      
-      return citationData ? parseInt(citationData.local_count, 10) : 0;
-    } catch (error) {
-      logDebug('Error getting citation count:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * 构建搜索查询参数
-   */
-  private buildSearchQuery(query: string, options: WoSSearchOptions): Record<string, any> {
-    // 构建WOS查询字符串 - 支持多主题和复杂查询
-    let formattedQuery = this.buildWosQuery(query, options);
-
-    const params: Record<string, any> = {
-      q: formattedQuery,
-      db: options.databases?.join(',') || 'WOS',
-      limit: Math.min(options.maxResults || 10, 100), // WOS API限制最大100条
-      page: 1
-    };
-
-    // 添加排序参数 - 使用正确的API参数名
-    if (options.sortBy) {
-      const sortField = this.mapSortField(options.sortBy);
-      const direction = (options.sortOrder || 'DESC').toUpperCase();
-      params.sortField = `${sortField} ${direction}`; // v1/v2 expect "TAG DIRECTION"
-    }
-
-    return params;
-  }
-
-  /**
-   * 构建WOS格式的查询字符串
-   */
-  private buildWosQuery(query: string, options: WoSSearchOptions): string {
-    const queryParts: string[] = [];
-
-    // Validate query complexity first
-    const complexityCheck = validateQueryComplexity(query, {
-      maxLength: 1000,
-      maxBooleanOperators: 10
-    });
-    if (!complexityCheck.valid) {
-      throw new Error(complexityCheck.error);
-    }
-
-    // 处理主题搜索 - 支持多个关键词
-    if (query && query.trim()) {
-      // 检查是否已经包含WOS字段标签
-      // Supported field tags: TI, IS, SO, VL, PG, CS, PY, FPY, DOP, AU, AI, UT, DO, DT, PMID, OG, TS, SUR
-      const wosFieldTags = ['TS=', 'TI=', 'AU=', 'SO=', 'PY=', 'DO=', 'IS=', 'VL=', 'PG=', 'CS=', 
-                           'DT=', 'PMID=', 'FPY=', 'DOP=', 'AI=', 'UT=', 'OG=', 'SUR='];
-      const hasFieldTag = wosFieldTags.some(tag => query.toUpperCase().includes(tag));
-      
-      if (hasFieldTag) {
-        // 用户提供了带字段标签的查询，直接使用（不进行转义）
-        queryParts.push(query);
-      } else {
-        // 简单查询，使用TS(Topic)字段
-        const escapedQuery = escapeQueryValue(query, 'wos');
-        queryParts.push(`TS=(${escapedQuery})`);
-      }
-    }
-
-    // 添加年份过滤
-    if (options.year) {
-      if (options.year.includes('-')) {
-        // 年份范围 "2020-2023"
-        const [startYear, endYear] = options.year.split('-');
-        queryParts.push(`PY=(${startYear.trim()}-${endYear.trim()})`);
-      } else {
-        // 单个年份
-        queryParts.push(`PY=${options.year}`);
-      }
-    }
-
-    // 添加作者过滤
-    if (options.author) {
-      const escapedAuthor = escapeQueryValue(options.author, 'wos');
-      queryParts.push(`AU=(${escapedAuthor})`);
-    }
-
-    // 添加期刊过滤
-    if (options.journal) {
-      const escapedJournal = escapeQueryValue(options.journal, 'wos');
-      queryParts.push(`SO=(${escapedJournal})`);
-    }
-
-    // 添加ISSN/ISBN过滤 (IS field tag)
-    if (options.issn) {
-      queryParts.push(`IS=${options.issn}`);
-    }
-
-    // 添加卷号过滤 (VL field tag)
-    if (options.volume) {
-      queryParts.push(`VL=${options.volume}`);
-    }
-
-    // 添加页码过滤 (PG field tag)
-    if (options.page) {
-      queryParts.push(`PG=${options.page}`);
-    }
-
-    // 添加期号过滤 (CS field tag - Issue)
-    if (options.issue) {
-      queryParts.push(`CS=${options.issue}`);
-    }
-
-    // 添加文档类型过滤 (DT field tag)
-    if (options.documentTypes && options.documentTypes.length > 0) {
-      const dtQuery = options.documentTypes.map(dt => `"${dt}"`).join(' OR ');
-      queryParts.push(`DT=(${dtQuery})`);
-    }
-
-    // 添加PubMed ID过滤 (PMID field tag)
-    if (options.pmid) {
-      queryParts.push(`PMID=${options.pmid}`);
-    }
-
-    // 添加DOI过滤 (DO field tag)
-    if (options.doi) {
-      queryParts.push(`DO="${options.doi}"`);
-    }
-
-    // 用AND连接所有查询部分
-    return queryParts.join(' AND ');
-  }
-
-  /**
-   * 转义WOS查询中的特殊字符
-   */
-  private escapeWosQuery(query: string): string {
-    if (!query) return '';
-
-    // 移除多余的引号和转义特殊字符
-    return query
-      .replace(/"/g, '') // 移除引号
-      .replace(/[\(\)]/g, '') // 移除括号(API会自动添加)
-      .trim();
-  }
-
-  /**
-   * 映射排序字段到WOS API格式
-   */
-  private mapSortField(sortBy: string): string {
-    const fieldMap: Record<string, string> = {
-      'relevance': 'relevance',
-      'date': 'PD', // Publication Date - 更准确的日期排序字段
-      'citations': 'TC', // Times Cited
-      'title': 'TI', // Title
-      'author': 'AU', // Author
-      'journal': 'SO' // Source (Journal)
-    };
-    return fieldMap[sortBy.toLowerCase()] || 'relevance';
-  }
-
-  /**
-   * 解析搜索响应
-   */
-  private parseSearchResponse(data: WoSApiResponse): Paper[] {
-    if (!data.hits || !Array.isArray(data.hits)) {
-      logDebug('WoS: No hits found in response or hits is not an array');
-      return [];
-    }
-
-    if (process.env.NODE_ENV === 'development') {
-      logDebug(`WoS: Found ${data.hits.length} hits out of ${data.metadata?.total || 0} total`);
-    }
-    return data.hits.map(record => this.parseWoSRecord(record))
-      .filter(paper => paper !== null) as Paper[];
-  }
-
-  /**
-   * 解析单个WoS记录
-   */
-  private parseWoSRecord(record: WoSRecord): Paper | null {
-    try {
-      // 提取基本信息
-      const title = record.title || 'No title available';
-      const authors = record.names?.authors?.map(author => author.displayName) || [];
-      const abstractText = record.abstract || '';
-      
-      // 提取出版信息
-      const year = record.source?.publishYear;
-      const publishedDate = year ? new Date(year, 0, 1) : null;
-      const journal = record.source?.sourceTitle || '';
-      
-      // 提取DOI
-      const doi = record.identifiers?.doi || '';
-      
-      // 提取被引次数
-      const citationCount =
-        record.citations?.[0]?.citingArticlesCount ??
-        record.citations?.[0]?.count ??
-        0;
-      
-      // 提取关键词
-      const keywords = record.keywords?.authorKeywords || [];
-      
-      // 构建URL
-      const wosUrl = `https://www.webofscience.com/wos/woscc/full-record/${record.uid}`;
-
-      return PaperFactory.create({
-        paperId: record.uid,
-        title: this.cleanText(title),
-        authors: authors,
-        abstract: this.cleanText(abstractText),
-        doi: doi,
-        publishedDate: publishedDate,
-        pdfUrl: '', // WoS通常不提供直接PDF链接
-        url: wosUrl,
-        source: 'webofscience',
-        categories: record.types || [],
-        keywords: keywords,
-        citationCount: citationCount,
-        journal: journal,
-        volume: record.source?.volume || undefined,
-        issue: record.source?.issue || undefined,
-        pages: record.source?.pages || undefined,
-        year: year,
-        extra: {
-          uid: record.uid,
-          doctype: record.types?.[0],
-          sourceTypes: record.sourceTypes
-        }
-      });
-    } catch (error) {
-      logDebug('Error parsing WoS record:', error);
-      logDebug('Record data:', record);
-      return null;
-    }
-  }
-
-  /**
-   * 发起API请求 - 支持自动版本降级
-   */
-  private async makeApiRequest(endpoint: string, config: any, isRetry: boolean = false): Promise<AxiosResponse> {
-    await this.rateLimiter.waitForPermission();
-    this.quotaManager.checkQuota('webofscience');
-
-    const url = `${this.apiUrl}${endpoint}`;
-
-    const requestConfig = {
-      ...config,
-      headers: {
-        'X-ApiKey': this.apiKey,
-        'Content-Type': 'application/json',
-        'User-Agent': USER_AGENT,
-        ...config.headers
-      },
-      timeout: TIMEOUTS.DEFAULT
-    };
-
-    // Debug logs only in development to avoid noisy stderr in CI/production
-    if (process.env.NODE_ENV === 'development') {
-      logDebug(`WoS API Request: ${config.method} ${url} (version: ${this.apiVersion})`);
-      logDebug('WoS Request params:', config.params);
-    }
-
-    try {
-      const response = await ErrorHandler.retryWithBackoff(
-        () => axios(url, requestConfig),
-        { context: 'Web of Science API' }
-      );
-
-      this.quotaManager.incrementUsage('webofscience');
-
-      if (process.env.NODE_ENV === 'development') {
-        logDebug(`WoS API Response: ${response.status} ${response.statusText}`);
-        logDebug('WoS Response data preview:', JSON.stringify(response.data, null, 2).substring(0, 500));
-      }
-      // Reset fallback state on success
-      this.resetFallbackState();
-      return response;
-    } catch (error: any) {
-      const status = error.response?.status;
-
-      if (process.env.NODE_ENV === 'development') {
-        logDebug(`WoS API Error (${this.apiVersion}):`, {
-          status,
-          statusText: error.response?.statusText,
-          data: error.response?.data,
-          config: {
-            url: error.config?.url,
-            method: error.config?.method,
-            params: error.config?.params
-          }
+      const results = product === 'expanded'
+        ? await this.expandedClient.search(query, toExpandedOptions(options))
+        : await this.starterClient.search(query, toStarterOptions(options));
+      if (!options.discoverAccess) return results;
+      try {
+        return await this.accessDiscovery.enrich(results, {
+          maxItems: options.discoverAccessMaxItems ?? this.accessDiscoveryMaxItems,
+          operation: options.operationContext
         });
+      } catch {
+        // Access discovery is best-effort enrichment; a batch-level rejection
+        // must never discard a successful official WoS result set.
+        return results;
       }
-
-      // Try fallback version for connection/server errors (not auth errors)
-      // 404, 500, 502, 503, 504, or network errors trigger fallback
-      const shouldFallback = !isRetry && (
-        !status || // Network error
-        status === 404 || // Not found (version mismatch)
-        status >= 500 // Server errors
-      );
-
-      if (shouldFallback && this.switchToFallbackVersion()) {
-        logDebug(`Retrying with WoS API ${this.apiVersion}...`);
-        return this.makeApiRequest(endpoint, config, true);
-      }
-
-      throw error;
+    } catch (error) {
+      if (error instanceof ApiError || error instanceof CapabilityUnavailableError) throw error;
+      this.handleHttpError(error, `search (${product})`);
     }
   }
 
-  /**
-   * 验证API密钥
-   */
-  async validateApiKey(): Promise<boolean> {
-    if (!this.apiKey) return false;
-
+  async getPaperByDoi(doi: string): Promise<Paper | null> {
+    const result = sanitizeDoi(doi);
+    if (!result.valid) return null;
     try {
-      await this.search('test', { maxResults: 1 });
-      return true;
-    } catch (error: any) {
-      // API密钥无效通常返回401或403
-      if (error.response?.status === 401 || error.response?.status === 403) {
-        return false;
-      }
-      // 其他错误可能是网络问题，认为密钥可能有效
-      return true;
+      const papers = await this.starterClient.search(`DO="${result.sanitized}"`, { maxResults: 1 });
+      return papers[0] || null;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      this.handleHttpError(error, 'get document by DOI');
     }
   }
+
+  async getReferenceIds(uid: string): Promise<string[]> {
+    this.requireExpanded('references');
+    try {
+      const result = await this.expandedClient.getReferences(uid, { maxResults: 50 });
+      return result.items
+        .map(reference => reference.uid)
+        .filter((uid): uid is string => Boolean(uid));
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      this.handleHttpError(error, 'get reference IDs');
+    }
+  }
+
+  async getCitationIds(uid: string): Promise<string[]> {
+    this.requireExpanded('citing');
+    if (!/^WOS:/i.test(uid)) throw new Error('Expanded citing records require a Web of Science Core Collection UID');
+    try {
+      const result = await this.expandedClient.getCiting(uid, { maxResults: 100, recordView: 'short' });
+      return result.items.map(paper => paper.paperId).filter(Boolean);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      this.handleHttpError(error, 'get citation IDs');
+    }
+  }
+
+  async getRelatedRecords(uid: string, relation: WosRelation, options: ExpandedRelationOptions = {}): Promise<WosRelationResult<Paper | WosReference>> {
+    this.requireExpanded(relation);
+    try {
+      if (relation === 'references') {
+        if (options.recordView !== undefined) {
+          throw new Error('references does not accept recordView');
+        }
+        return this.expandedClient.getReferences(uid, options);
+      }
+      if (relation === 'citing' && !/^WOS:/i.test(uid)) {
+        throw new Error('Expanded citing records require a Web of Science Core Collection UID');
+      }
+      return relation === 'citing'
+        ? this.expandedClient.getCiting(uid, options)
+        : this.expandedClient.getRelated(uid, options);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      this.handleHttpError(error, `get ${relation} records`);
+    }
+  }
+
+  async getPaperWithCitations(uid: string): Promise<Paper | null> {
+    this.requireExpanded('citation relationships');
+    const paper = await this.expandedClient.getByUid(uid, 'short');
+    if (!paper) return null;
+    const [references, citations] = await Promise.all([
+      this.expandedClient.getReferences(uid, { maxResults: 100 }),
+      /^WOS:/i.test(uid) ? this.expandedClient.getCiting(uid, { maxResults: 100 }) : Promise.resolve({ queryResult: {}, items: [] as Paper[] })
+    ]);
+    paper.references = references.items
+      .map(reference => reference.uid)
+      .filter((referenceId): referenceId is string => Boolean(referenceId));
+    paper.extra = { ...(paper.extra || {}), citationIds: citations.items.map(item => item.paperId) };
+    return paper;
+  }
+
+  async getCitationCount(paperId: string, apiProduct: 'starter' | 'expanded' = 'starter'): Promise<number | undefined> {
+    this.requireProduct(apiProduct);
+    try {
+      return apiProduct === 'expanded'
+        ? (await this.expandedClient.getByUid(paperId, 'short'))?.citationCount
+        : await this.starterClient.getCitationCount(paperId);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      this.handleHttpError(error, `get ${apiProduct} citation count`);
+    }
+  }
+
+  async validateApiKey(): Promise<boolean> {
+    return (await this.starterClient.validateApiKeyStatus()) === 'valid';
+  }
+
+  async getStatus(validate = false): Promise<WebOfScienceStatus> {
+    const starter = this.starterClient.getStatus();
+    const expanded = this.expandedClient.getStatus();
+    const starterApiKeyStatus = validate ? await this.starterClient.validateApiKeyStatus() : configuredStatus(starter.configured);
+    const expandedApiKeyStatus = validate ? await this.expandedClient.validateApiKeyStatus() : configuredStatus(expanded.configured);
+    return {
+      starter: { ...starter, apiKeyStatus: starterApiKeyStatus },
+      expanded: { ...expanded, apiKeyStatus: expandedApiKeyStatus },
+      scrapingAnt: this.retrievalService.getProcessStatus()
+    };
+  }
+
+  getScrapingAntStatus(): RetrievalProcessStatus {
+    return this.retrievalService.getProcessStatus();
+  }
+
+  getPublicAccessDiscovery(): PublicAccessDiscovery {
+    return this.accessDiscovery;
+  }
+
+  getApiVersion(): 'v1' | 'v2' {
+    return this.starterClient.getVersion();
+  }
+
+  async downloadPdf(_paperId: string, _options?: DownloadOptions): Promise<string> {
+    throw new Error('Web of Science does not support direct PDF download. Use a DOI or publisher access link.');
+  }
+
+  async readPaper(_paperId: string, _options?: DownloadOptions): Promise<string> {
+    throw new Error('Web of Science does not provide full-text content.');
+  }
+
+  private requireProduct(product: 'starter' | 'expanded'): void {
+    const configured = product === 'starter' ? this.starterClient.isConfigured() : this.expandedClient.isConfigured();
+    if (!configured) {
+      throw new CapabilityUnavailableError(
+        `webofscience-${product}`,
+        'api',
+        `Web of Science ${product} API key is required`
+      );
+    }
+  }
+
+  private requireExpanded(capability: string): void {
+    if (!this.expandedClient.isConfigured()) {
+      throw new CapabilityUnavailableError('webofscience-expanded', capability, 'Web of Science Expanded API is not configured');
+    }
+  }
+}
+
+function toStarterOptions(options: WoSSearchOptions): StarterClientSearchOptions {
+  return { ...options };
+}
+
+function toExpandedOptions(options: WoSSearchOptions): ExpandedClientSearchOptions {
+  return { ...options, recordView: options.recordView || 'short' };
+}
+
+function configuredStatus(configured: boolean): ApiKeyValidationStatus {
+  return configured ? 'configured' : 'missing';
+}
+
+function firstConfigured(...values: Array<string | undefined>): string | undefined {
+  return values.find(value => typeof value === 'string' && value.trim() !== '')?.trim();
+}
+
+function normalizeResultCount(value: number | undefined, maximum: number, product: string): number {
+  const count = value ?? 10;
+  if (!Number.isInteger(count) || count < 1 || count > maximum) {
+    throw new Error(`Web of Science ${product} maxResults must be an integer between 1 and ${maximum}`);
+  }
+  return count;
+}
+
+function normalizeRelationCount(value: number | undefined): number {
+  const count = value ?? 50;
+  if (!Number.isInteger(count) || count < 1 || count > 100) {
+    throw new Error('Web of Science relation maxResults must be an integer between 1 and 100');
+  }
+  return count;
+}
+
+function normalizeFirstRecord(value: number | undefined): number {
+  const firstRecord = value ?? 1;
+  if (!Number.isInteger(firstRecord) || firstRecord < 1 || firstRecord > 100000) {
+    throw new Error('Web of Science firstRecord must be an integer between 1 and 100000');
+  }
+  return firstRecord;
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function mapWosSortField(sortBy?: string, sortOrder: 'asc' | 'desc' = 'desc'): string | undefined {
+  if (!sortBy) return undefined;
+  const field = ({ relevance: 'RS', date: 'PY', citations: 'TC' } as Record<string, string>)[sortBy.toLowerCase()];
+  if (!field) throw new Error(`Unsupported Web of Science sort field: ${sortBy}`);
+  return `${field}+${sortOrder.toLowerCase() === 'asc' ? 'A' : 'D'}`;
+}
+
+interface WosQueryOptions {
+  year?: string;
+  author?: string;
+  journal?: string;
+  issn?: string;
+  volume?: string;
+  page?: string;
+  issue?: string;
+  documentTypes?: string[];
+  pmid?: string;
+  doi?: string;
+}
+
+function buildWosQuery(query: string, options: WosQueryOptions = {}): string {
+  const complexity = validateQueryComplexity(query, { maxLength: 1000, maxBooleanOperators: 10 });
+  if (!complexity.valid) throw new Error(complexity.error);
+
+  const parts: string[] = [];
+  const trimmed = query.trim();
+  if (trimmed) {
+    const upper = trimmed.toUpperCase();
+    const tags = ['TS=', 'TI=', 'AU=', 'SO=', 'PY=', 'DO=', 'IS=', 'VL=', 'PG=', 'CS=', 'DT=', 'PMID=', 'FPY=', 'DOP=', 'AI=', 'UT=', 'OG=', 'SUR='];
+    parts.push(tags.some(tag => upper.includes(tag)) ? trimmed : `TS=(${escapeQueryValue(trimmed, 'wos')})`);
+  }
+  if (options.year) {
+    const year = options.year.replace(/\s+/g, '');
+    if (!/^\d{4}(?:-\d{4})?$/.test(year)) throw new Error('Web of Science year must be YYYY or YYYY-YYYY');
+    parts.push(year.includes('-') ? `PY=(${year})` : `PY=${year}`);
+  }
+  if (options.author) parts.push(`AU=${wosLiteral(options.author)}`);
+  if (options.journal) parts.push(`SO=${wosLiteral(options.journal)}`);
+  if (options.issn) parts.push(`IS=${safeWosToken(options.issn, 'ISSN')}`);
+  if (options.volume) parts.push(`VL=${safeWosToken(options.volume, 'volume')}`);
+  if (options.page) parts.push(`PG=${safeWosToken(options.page, 'page')}`);
+  if (options.issue) parts.push(`CS=${safeWosToken(options.issue, 'issue')}`);
+  if (options.documentTypes?.length) {
+    const types = options.documentTypes.map(type => wosLiteral(type));
+    parts.push(`DT=(${types.join(' OR ')})`);
+  }
+  if (options.pmid) {
+    if (!/^\d{1,20}$/.test(options.pmid.trim())) throw new Error('Web of Science PMID must be numeric');
+    parts.push(`PMID=${options.pmid.trim()}`);
+  }
+  if (options.doi) {
+    const doi = sanitizeDoi(options.doi);
+    if (!doi.valid) throw new Error(doi.error || 'Invalid DOI format');
+    parts.push(`DO="${doi.sanitized}"`);
+  }
+  return parts.join(' AND ');
+}
+
+function wosLiteral(value: string): string {
+  const sanitized = escapeQueryValue(value, 'general').replace(/[()]/g, '').trim();
+  if (!sanitized) throw new Error('Web of Science field filter must not be empty');
+  return `"${sanitized}"`;
+}
+
+function safeWosToken(value: string, field: string): string {
+  const token = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/.test(token)) {
+    throw new Error(`Web of Science ${field} contains unsupported characters`);
+  }
+  return token;
 }
