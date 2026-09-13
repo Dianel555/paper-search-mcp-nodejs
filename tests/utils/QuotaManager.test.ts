@@ -48,6 +48,39 @@ describe('QuotaManager', () => {
 
       delete process.env.TEST_DAILY_LIMIT;
     });
+
+    it('supports an explicit environment variable and preserves usage on re-registration', () => {
+      process.env.TEST_BUDGET = '4';
+      quotaManager.registerPlatform('test-platform', { dailyLimit: 10, envVar: 'TEST_BUDGET' });
+      quotaManager.incrementUsageBy('test-platform', 2);
+      quotaManager.registerPlatform('test-platform', { dailyLimit: 20, envVar: 'TEST_BUDGET' });
+      expect(quotaManager.getStatus('test-platform')).toEqual(expect.objectContaining({ limit: 4, used: 2, remaining: 2 }));
+      delete process.env.TEST_BUDGET;
+    });
+
+    it('reserves and releases bounded work without losing completed usage', () => {
+      quotaManager.registerPlatform('full-record', { dailyLimit: 3 });
+      const reservation = quotaManager.reserve('full-record', 2);
+      expect(quotaManager.getStatus('full-record')?.used).toBe(0);
+      expect(() => quotaManager.reserve('full-record', 2)).toThrow(QuotaExhaustedError);
+      quotaManager.release(reservation);
+      quotaManager.incrementUsageBy('full-record', 1);
+      expect(quotaManager.getStatus('full-record')).toEqual(expect.objectContaining({ used: 1, remaining: 2 }));
+    });
+
+    it('commits a reservation idempotently and ignores tokens from a previous day', () => {
+      quotaManager.registerPlatform('periodic', { dailyLimit: 5 });
+      const reservation = quotaManager.reserve('periodic', 1);
+      quotaManager.commit(reservation);
+      quotaManager.commit(reservation);
+      expect(quotaManager.getStatus('periodic')?.used).toBe(1);
+
+      const stale = quotaManager.reserve('periodic', 1);
+      const record = (quotaManager as any).quotas.get('periodic');
+      record.dayKey = '2000-01-01';
+      quotaManager.commit(stale);
+      expect(quotaManager.getStatus('periodic')?.used).toBe(0);
+    });
   });
 
   describe('checkQuota and incrementUsage', () => {

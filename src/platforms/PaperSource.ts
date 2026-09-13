@@ -7,8 +7,11 @@ import { Paper } from '../models/Paper.js';
 import { sanitizeRequest, maskSensitiveData } from '../utils/SecurityUtils.js';
 import { ErrorHandler, ApiError } from '../utils/ErrorHandler.js';
 import { logDebug } from '../utils/Logger.js';
+import type { RetrievalOperationContext } from '../retrieval/types.js';
 
 export interface SearchOptions {
+  /** Internal MCP composition context; never accepted from tool arguments. */
+  operationContext?: RetrievalOperationContext;
   /** 最大结果数量 */
   maxResults?: number;
   /** 年份过滤 */
@@ -44,6 +47,8 @@ export interface SearchOptions {
 }
 
 export interface DownloadOptions {
+  /** Internal MCP composition context; never accepted from tool arguments. */
+  operationContext?: RetrievalOperationContext;
   /** 保存路径 */
   savePath?: string;
   /** 是否覆盖现有文件 */
@@ -115,9 +120,9 @@ export abstract class PaperSource {
    * @param doi DOI标识符
    * @returns Promise<Paper | null> 论文信息或null
    */
-  async getPaperByDoi(doi: string): Promise<Paper | null> {
+  async getPaperByDoi(doi: string, options?: SearchOptions): Promise<Paper | null> {
     try {
-      const results = await this.search(doi, { maxResults: 1 });
+      const results = await this.search(doi, { ...options, maxResults: 1 });
       return results.length > 0 ? results[0] : null;
     } catch (error) {
       logDebug(`Error getting paper by DOI from ${this.platformName}:`, error);

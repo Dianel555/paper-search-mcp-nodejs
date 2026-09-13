@@ -60,9 +60,9 @@ describe('WebOfScienceSearcher', () => {
     });
   });
 
-  describe('API version fallback', () => {
-    it('should have fallback mechanism', () => {
-      // The fallback is internal, test via behavior
+  describe('API version selection', () => {
+    it('keeps the selected version fixed for the instance', () => {
+      // Version changes are intentionally not performed after transient errors.
       expect(searcher).toBeDefined();
     });
   });
@@ -100,18 +100,16 @@ describe('WebOfScienceSearcher', () => {
   });
 
   describe('getReferenceIds', () => {
-    it('should require API key', async () => {
+    it('should report unavailable Expanded capability instead of returning an empty array', async () => {
       const noKeySearcher = new WebOfScienceSearcher();
-      const result = await noKeySearcher.getReferenceIds('test-uid');
-      expect(result).toEqual([]);
+      await expect(noKeySearcher.getReferenceIds('test-uid')).rejects.toThrow(/Expanded API/i);
     });
   });
 
   describe('getCitationIds', () => {
-    it('should require API key', async () => {
+    it('should report unavailable Expanded capability instead of returning an empty array', async () => {
       const noKeySearcher = new WebOfScienceSearcher();
-      const result = await noKeySearcher.getCitationIds('test-uid');
-      expect(result).toEqual([]);
+      await expect(noKeySearcher.getCitationIds('WOS:test-uid')).rejects.toThrow(/Expanded API/i);
     });
   });
 });

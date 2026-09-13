@@ -1,6 +1,6 @@
 {
   "name": "paper-search-mcp-nodejs",
-  "version": "0.2.7-patch.0",
+  "version": "0.3.0",
   "description": "A Node.js MCP server for searching and downloading academic papers from multiple sources, including arXiv, PubMed, bioRxiv, Web of Science, and more.",
   "main": "dist/server.js",
   "type": "module",
@@ -35,9 +35,11 @@
     "axios": "^1.7.2",
     "cheerio": "^1.1.2",
     "dotenv": "^16.4.5",
+    "https-proxy-agent": "^7.0.6",
     "lru-cache": "^11.2.5",
     "p-limit": "^7.2.0",
     "pdf-parse": "^1.1.4",
+    "socks-proxy-agent": "^8.0.5",
     "xml2js": "^0.6.2",
     "zod": "^3.23.8"
   },

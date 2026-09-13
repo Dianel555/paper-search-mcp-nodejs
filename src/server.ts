@@ -5,16 +5,8 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  InitializeRequestSchema,
-  PingRequestSchema
-} from '@modelcontextprotocol/sdk/types.js';
 import * as dotenv from 'dotenv';
-import { TOOLS } from './mcp/tools.js';
-import { initializeSearchers } from './mcp/searchers.js';
-import { handleToolCall } from './mcp/handleToolCall.js';
+import { registerMcpHandlers } from './mcp/registerHandlers.js';
 import { isMCPMode, logDebug } from './utils/Logger.js';
 
 dotenv.config();
@@ -22,7 +14,7 @@ dotenv.config();
 const server = new Server(
   {
     name: 'paper-search-mcp-nodejs',
-    version: '0.2.7'
+    version: '0.3.0'
   },
   {
     capabilities: {
@@ -33,52 +25,7 @@ const server = new Server(
   }
 );
 
-server.setRequestHandler(InitializeRequestSchema, async request => {
-  logDebug('Received initialize request:', request.params);
-  return {
-    protocolVersion: '2024-11-05',
-    capabilities: {
-      tools: {
-        listChanged: true
-      }
-    },
-    serverInfo: {
-      name: 'paper-search-mcp-nodejs',
-      version: '0.2.7'
-    }
-  };
-});
-
-server.setRequestHandler(PingRequestSchema, async () => {
-  logDebug('Received ping request');
-  return {};
-});
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  logDebug('Received tools/list request');
-  return { tools: TOOLS };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async request => {
-  const { name, arguments: args } = request.params;
-  logDebug(`Received tools/call request: ${name}`);
-
-  try {
-    const currentSearchers = initializeSearchers();
-    return await handleToolCall(name, args, currentSearchers);
-  } catch (error: any) {
-    logDebug(`Error in tool ${name}:`, error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error executing tool '${name}': ${error?.message || 'Unknown error occurred'}`
-        }
-      ],
-      isError: true
-    };
-  }
-});
+registerMcpHandlers(server);
 
 /**
  * 启动服务器

@@ -7,11 +7,13 @@
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
 
 ## ✨ 核心特性
 
 - **🌍 14个学术平台**: arXiv, Web of Science, PubMed, Google Scholar, bioRxiv, medRxiv, Semantic Scholar, IACR ePrint, Sci-Hub, ScienceDirect, Springer Nature, Wiley, Scopus, Crossref
+- **🧭 WoS Starter + Expanded**：默认 Starter v2；Expanded 的 SR/FR 与引用关系必须显式选择
+- **🌐 公共页面访问发现**：可选使用 ScrapingAnt Extended 抓取 DOI 出版商页面；不会代理 Clarivate API 或机构登录页面
 - **🔗 MCP协议集成**: 与Claude Desktop和其他AI助手无缝集成
 - **📊 统一数据模型**: 标准化的论文数据格式，支持所有平台
 - **⚡ 高性能搜索**: 并发搜索和智能速率限制
@@ -26,14 +28,14 @@
 |------|------|------|------|----------|---------|----------|
 | **Crossref** | ✅ | ❌ | ❌ | ✅ | ❌ | 默认搜索平台，广泛的元数据覆盖 |
 | **arXiv** | ✅ | ✅ | ✅ | ❌ | ❌ | 物理/计算机科学预印本 |
-| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 多主题搜索、日期排序、年份范围 |
+| **Web of Science** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 默认 Starter v2；Expanded SR/FR 与关系查询需显式启用 |
 | **PubMed** | ✅ | ❌ | ❌ | ❌ | 🟡 可选 | 生物医学文献 |
-| **Google Scholar** | ✅ | ❌ | ❌ | ✅ | ❌ | 广泛学术搜索 |
+| **Google Scholar** | ✅ | ❌ | ❌ | ✅ | ❌ | 直接解析或可选 ScrapingAnt General |
 | **bioRxiv** | ✅ | ✅ | ✅ | ❌ | ❌ | 生物学预印本 |
 | **medRxiv** | ✅ | ✅ | ✅ | ❌ | ❌ | 医学预印本 |
 | **Semantic Scholar** | ✅ | ✅ | ❌ | ✅ | 🟡 可选 | AI语义搜索 |
 | **IACR ePrint** | ✅ | ✅ | ✅ | ❌ | ❌ | 密码学论文 |
-| **Sci-Hub** | ✅ | ✅ | ❌ | ❌ | ❌ | 通过DOI获取论文 |
+| **Sci-Hub** | 需启用 | 需启用 | ❌ | ❌ | ❌ | 仅 DOI 的受控 HTML 适配器，默认关闭 |
 | **ScienceDirect** | ✅ | ❌ | ❌ | ✅ | ✅ 必需 | 爱思唯尔全文数据库 |
 | **Springer Nature** | ✅ | ✅* | ❌ | ❌ | ✅ 必需 | 双API：Meta v2 & OpenAccess |
 | **Wiley** | ❌ | ✅ | ✅ | ❌ | ✅ 必需 | TDM API：仅支持DOI下载PDF |
@@ -47,8 +49,8 @@
 
 本项目包含的部分集成可能涉及**法律、第三方服务条款（ToS）与伦理**风险。你需要自行确保使用方式符合当地法律、机构政策以及第三方平台条款。
 
-- **Sci-Hub**：在许多司法辖区可能涉及未经授权获取受版权保护内容。请仅在你拥有合法访问权的情况下使用（例如开放获取、作者公开版本或机构合法订阅）。
-- **Google Scholar**：该集成依赖自动化抓取/解析，可能违反 Google 的服务条款，且可能触发封禁/限流。若需要严格 ToS 合规，建议优先使用官方 API 或元数据平台（如 Crossref、Semantic Scholar）。
+- **Sci-Hub**：默认关闭且仅提供不稳定的 DOI/镜像适配器，不授予访问权。只有在你对内容拥有合法访问授权时才应显式启用。
+- **Google Scholar/ScrapingAnt**：自动抓取可能触发封禁或违反服务条款。ScrapingAnt 仅在配置后用于公共 Scholar/出版社页面，不用于 WoS 登录、SSO、MFA 或机构订阅页面。
 
 ## 🚀 快速开始
 
@@ -86,8 +88,34 @@ cp .env.example .env
 3. **配置环境变量**
    ```bash
    # 编辑 .env 文件
-   WOS_API_KEY=your_actual_api_key_here
-   WOS_API_VERSION=v1
+   # Web of Science 默认使用 Starter v2 和 WOS_API_KEY。
+   WOS_API_KEY=your_web_of_science_api_key
+   # Expanded 产品密钥（可选）。
+   WOS_EXPANDED_API_KEY=your_expanded_key
+   WOS_STARTER_VERSION=v2
+   WOS_STARTER_RPS=1
+   WOS_STARTER_DAILY_LIMIT=50
+   WOS_EXPANDED_RPS=2
+   # 每日 Full Record 条数；0 表示本地配额不限。
+   WOS_EXPANDED_FULL_RECORD_BUDGET=0
+   WOS_EXPANDED_BASE_URL=https://api.clarivate.com/api/wos
+
+   # 可选的公共页面 HTML 抓取；不会代理 WoS
+   # 仅有 key 不会授权付费检索；browser 后备必须显式开启。
+   # 拒绝 residential；默认每操作 50 credits、每请求 10 credits。
+   SCRAPINGANT_API_KEY=
+   SCRAPINGANT_ENABLED=false
+   SCRAPINGANT_ALLOW_BROWSER_ESCALATION=false
+   SCRAPINGANT_MAX_CREDITS_PER_OPERATION=50
+   SCRAPINGANT_MAX_CREDITS_PER_REQUEST=10
+   SCRAPINGANT_MAX_CONCURRENCY=1
+   SCRAPINGANT_PROXY_TYPE=datacenter
+
+   # 受控 Sci-Hub 适配器；除非显式开启，否则关闭
+   SCIHUB_ENABLED=false
+   SCIHUB_FETCH_MODE=fallback
+   SCIHUB_MIRRORS=
+   SCIHUB_HEALTHCHECK_CONCURRENCY=3
    
    # PubMed API密钥（可选，建议配置以获得更好性能）
    PUBMED_API_KEY=your_ncbi_api_key_here
@@ -95,8 +123,10 @@ cp .env.example .env
    # Semantic Scholar API密钥（可选，提升请求限制）
    SEMANTIC_SCHOLAR_API_KEY=your_semantic_scholar_api_key
    
-   # Elsevier API密钥（ScienceDirect和Scopus必需）
+   # Elsevier API密钥：ScienceDirect Search v2 和 Scopus 详情接口
    ELSEVIER_API_KEY=your_elsevier_api_key
+   # 可选：Scopus Search API 专用密钥；未配置时回退到 ELSEVIER_API_KEY
+   SCOPUS_SEARCH_API_KEY=
    
    # Springer Nature API密钥（Springer必需）
    SPRINGER_API_KEY=your_springer_api_key  # Meta v2 API
@@ -138,7 +168,9 @@ npm run dev
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-#### NPX配置 (推荐)
+#### 完整 NPX 配置（推荐）
+下面是完整的 MCP 配置示例。`env` 中的值必须都是字符串；未启用的平台可以保留空值。请替换所有占位符为你自己的环境变量，不要将真实密钥提交到仓库。
+
 ```json
 {
   "mcpServers": {
@@ -146,25 +178,55 @@ npm run dev
       "command": "npx",
       "args": ["-y", "paper-search-mcp-nodejs"],
       "env": {
-        "WOS_API_KEY": "your_web_of_science_api_key"
+        "NODE_ENV": "production",
+        "LOG_LEVEL": "info",
+        "WOS_API_KEY": "your_web_of_science_api_key",
+        "WOS_STARTER_VERSION": "v2",
+        "WOS_STARTER_RPS": "1",
+        "WOS_STARTER_DAILY_LIMIT": "50",
+        "WOS_EXPANDED_API_KEY": "",
+        "WOS_EXPANDED_RPS": "2",
+        "WOS_EXPANDED_FULL_RECORD_BUDGET": "0",
+        "WOS_EXPANDED_BASE_URL": "https://api.clarivate.com/api/wos",
+        "PUBMED_API_KEY": "",
+        "SEMANTIC_SCHOLAR_API_KEY": "",
+        "ELSEVIER_API_KEY": "",
+        "SCOPUS_SEARCH_API_KEY": "",
+        "SPRINGER_API_KEY": "",
+        "SPRINGER_OPENACCESS_API_KEY": "",
+        "WILEY_TDM_TOKEN": "",
+        "CROSSREF_MAILTO": "you@example.com",
+        "SCRAPINGANT_API_KEY": "",
+        "SCRAPINGANT_ENABLED": "false",
+        "SCRAPINGANT_ALLOW_BROWSER_ESCALATION": "false",
+        "SCRAPINGANT_MAX_CREDITS_PER_OPERATION": "50",
+        "SCRAPINGANT_MAX_CREDITS_PER_REQUEST": "10",
+        "SCRAPINGANT_MAX_CONCURRENCY": "1",
+        "SCRAPINGANT_PROXY_TYPE": "datacenter",
+        "SCHOLAR_PROXY": "http://user:password@proxy.example:8080",
+        "SCIHUB_ENABLED": "false",
+        "SCIHUB_FETCH_MODE": "fallback",
+        "SCIHUB_MIRRORS": "",
+        "SCIHUB_HEALTHCHECK_CONCURRENCY": "3",
+        "DEFAULT_DOWNLOAD_PATH": "./downloads",
+        "MAX_FILE_SIZE_MB": "100",
+        "RATE_LIMIT_REQUESTS_PER_MINUTE": "60",
+        "RATE_LIMIT_BURST": "10"
       }
     }
   }
 }
 ```
 
+请将 `SCHOLAR_PROXY` 占位符替换为已授权的代理；如果进程已经继承 `HTTPS_PROXY`/`HTTP_PROXY`，则删除该配置项。`WOS_EXPANDED_API_KEY`、`SCRAPINGANT_API_KEY` 及其他可选密钥可以保持为空。
+
 #### 本地安装配置
+本地构建时保留上方完整的 `env` 对象，只需替换服务器命令：
+
 ```json
 {
-  "mcpServers": {
-    "paper_search_nodejs": {
-      "command": "node",
-      "args": ["/path/to/paper-search-mcp-nodejs/dist/server.js"],
-      "env": {
-        "WOS_API_KEY": "your_web_of_science_api_key"
-      }
-    }
-  }
+  "command": "node",
+  "args": ["/path/to/paper-search-mcp-nodejs/dist/server.js"]
 }
 ```
 
@@ -233,9 +295,19 @@ search_arxiv({
 ```typescript
 search_webofscience({
   query: "CRISPR gene editing",
-  maxResults: 15,
+  maxResults: 5,
   year: "2022",
-  journal: "Nature"
+  journal: "Nature",
+  apiProduct: "expanded",   // 省略则使用 Starter v2
+  recordView: "short",      // 仅 Expanded；full 需显式选择
+  discoverAccess: true,      // 可选出版社公共页面发现
+  discoverAccessMaxItems: 5  // 范围 1-100；默认 5
+})
+
+get_webofscience_related_records({
+  uid: "WOS:000000000000001",
+  relation: "citing",       // references、citing 或 related
+  maxResults: 50
 })
 ```
 
@@ -310,9 +382,10 @@ search_iacr({
 ```
 
 ### `search_scihub`
-通过DOI搜索并下载Sci-Hub论文
+受控、需显式启用的 Sci-Hub DOI 查询/下载；默认关闭且不是官方 API
 
 ```typescript
+// 需要设置 SCIHUB_ENABLED=true；仅接受 DOI/doi.org URL。
 search_scihub({
   doiOrUrl: "10.1038/nature12373",
   downloadPdf: true,
@@ -407,6 +480,16 @@ get_paper_by_doi({
 })
 ```
 
+### `discover_paper_access`
+按 DOI 发现一个出版社公共 PDF 候选。它不声称开放许可或完整下载成功；PDF 验证是可选且有界的。
+
+```typescript
+discover_paper_access({
+  doi: "https://doi.org/10.1038/s41586-023-12345-6",
+  verifyPdf: false
+})
+```
+
 ### `get_platform_status`
 检查平台状态和API密钥
 
@@ -468,6 +551,8 @@ src/
 │   └── searchers.ts          # 搜索器初始化
 ├── utils/
 │   ├── SecurityUtils.ts      # DOI验证、查询清理、注入防护
+│   ├── PublicNetwork.ts      # 公网目标DNS/重定向与SSRF校验
+│   ├── ConcurrencyLimiter.ts # 无依赖的并发限制
 │   ├── ErrorHandler.ts       # 统一错误处理与重试逻辑
 │   ├── RateLimiter.ts        # 令牌桶速率限制
 │   ├── QuotaManager.ts       # 每日配额追踪
@@ -477,7 +562,12 @@ src/
 ├── config/
 │   └── constants.ts          # 超时、端点、限制配置
 ├── services/
-│   └── CitationService.ts    # 引文获取服务
+│   ├── CitationService.ts            # 引文获取服务
+│   ├── WebOfScienceParser.ts         # Starter/Expanded响应解析
+│   ├── WebOfScienceRequestService.ts # WoS请求、重试、限流、配额
+│   ├── PublicHttpClient.ts           # 检查重定向的公网HTTP
+│   ├── ScrapingAntFetcher.ts         # General/Extended HTML封装
+│   └── PublicAccessDiscovery.ts      # DOI出版社页面PDF发现
 └── server.ts                 # MCP服务器主文件
 ```
 
@@ -512,15 +602,15 @@ npm run format
 ```
 
 **测试覆盖：**
-- 19个测试套件，158个测试用例
-- 所有13个平台搜索器已测试
+- 包含 WoS HTTP 契约、ScrapingAnt 状态/计费、公网 SSRF 校验、访问发现、Sci-Hub 后备/PDF 校验和 MCP schema 回归测试。
+- 各平台搜索器均有单元或契约测试覆盖
 - 安全工具（DOI验证、查询清理）
 - 错误处理器（错误分类、重试逻辑）
 - 速率限制集成、配额管理、请求缓存
 
 | 测试套件 | 覆盖状态 |
 |----------|----------|
-| 平台搜索器 | 13/13 ✅ |
+| 平台搜索器 | ✅ |
 | SecurityUtils | ✅ |
 | ErrorHandler | ✅ |
 | RateLimiter & Integration | ✅ |
@@ -546,14 +636,21 @@ Springer Nature提供两个API：
 
 ### Web of Science 特性
 
-🎯 **WoS Starter API v1/v2 支持**: 使用Clarivate的WoS Starter API，完整支持所有字段标签。
+🎯 **WoS Starter + Expanded**：Starter API v2 为默认版本，v1 仍可显式选择。Expanded 必须显式选择。
 
-**API版本配置:**
+**API版本与产品配置：**
 ```bash
-# 在.env文件中配置 (默认: v1)
-WOS_API_VERSION=v1   # 稳定版，推荐使用
-# WOS_API_VERSION=v2  # 较新版本，相同端点
+# Starter版本（默认v2；进程内固定）
+WOS_STARTER_VERSION=v2
+# WOS_STARTER_VERSION=v1
+
+# Web of Science 默认使用 Starter v2。
+WOS_API_KEY=...
+# Expanded 产品密钥（可选）。
+WOS_EXPANDED_API_KEY=...
 ```
+
+Starter 使用文档规定的 `/documents` 端点，每页最多 50 条；未知被引次数序列化为 `null`。Expanded 使用独立的 `/api/wos` 契约，默认 Short Record，并仅在显式请求时使用 Full Record、references、citing 或 related。默认地址采用当前 Swagger 服务器 `https://api.clarivate.com/api/wos`，不使用旧的 `wos-api.clarivate.com` 指引。
 
 ### 高级搜索语法
 
@@ -592,17 +689,20 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.2.7 改进:**
+**🔧 v0.3.0 改进:**
 
-- ✅ **Google Scholar**: 大幅增强反检测 — 会话管理、Cookie持久化、429/captcha检测自动重试、自适应延迟、代理支持（`SCHOLAR_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`）
+- ✅ **Google Scholar**: 隔离的同源会话与 HTML 解析 — 代理优先直连（`SCHOLAR_PROXY`/标准 proxy 环境变量），仅在传输失败或上游 5xx 时使用 ScrapingAnt General 兜底，不绕过 403/429/captcha
 - ✅ **arXiv**: 修复搜索查询前缀（`all:`），符合arXiv API规范
 - ✅ **Google Scholar**: 更新User-Agent到最新浏览器版本（Chrome 131, Firefox 133, Edge 131）
 - ✅ **性能优化**: 实现了 `RequestCache` 缓存搜索结果和API响应
 - ✅ **可靠性**: 添加了 `RateLimiter` 和 `QuotaManager` 防止API滥用和429错误
 - ✅ **新功能**: 添加了 `CitationService` 和 `PDFExtractor` 用于未来增强
 - ✅ **测试**: 将测试套件重组为 `tests/platforms`, `tests/utils`, 和 `tests/integration`
+- ✅ **WoS契约**：分离 Starter v1/v2 与 Expanded SR/FR/引用关系的请求和响应处理
+- ✅ **配额安全**：每次尝试限流、并发预留、Full Record预算及配额响应头状态
+- ✅ **公共访问发现**：校验 DOI 重定向并可选使用 ScrapingAnt 发现出版社公共页面
+- ✅ **共享服务**：解析和 WoS 请求机制移到平台门面之外的 services/utils
 - ✅ **18个字段标签**: 完整支持所有WoS Starter API字段标签
-- ✅ **API版本选择**: 支持v1和v2端点
 - ✅ **增强过滤**: ISSN、卷号、页码、期号、文档类型、PMID过滤器
 - ✅ **查询验证**: 查询复杂度和注入防护的安全检查
 
@@ -611,9 +711,13 @@ search_webofscience({
 - `year`: 单个年份"2023"或范围"2020-2023"
 - `author`: 作者名过滤
 - `journal`: 期刊/来源过滤
-- `sortBy`: 排序字段 (`date`, `citations`, `relevance`, `title`, `author`, `journal`)
+- `sortBy`: 支持的排序字段 (`date`, `citations`, `relevance`)
 - `sortOrder`: 排序方向 (`asc`, `desc`)
-- `maxResults`: 最大结果数 (每页1-50)
+- `maxResults`: 最大结果数 (1-100；Starter每页抓取50条)
+- `apiProduct`: `starter`（默认）或显式选择 `expanded`
+- `recordView`: Expanded 的 `short`（默认）或显式选择 `full`
+- `discoverAccess`: 可选出版社公共页面发现
+- `discoverAccessMaxItems`: 发现上限（1-100；显式值、部署默认值，最后为 5）
 
 **支持的WOS字段标签 (共18个):**
 | 标签 | 描述 | 标签 | 描述 |
@@ -651,11 +755,26 @@ export NODE_ENV=development
 # 在CI环境中，当 CI=true 时，会自动启用 logDebug 输出
 ```
 
+### Sci-Hub 特性
+
+- **仅显式启用**：默认关闭；只接受 DOI、`doi:` 和 `doi.org` URL
+- **受控后备**：先直连镜像，受阻时才在已配置 ScrapingAnt 后使用 Extended HTML 后备
+- **健康检查**：五个固定种子镜像，最多三个并发直连检查，带缓存和 single-flight
+- **明确状态**：区分未收录、受阻、DOM变化、镜像不健康和传输失败
+- **安全 PDF 处理**：公网目标重定向校验、MIME/魔数/大小校验、临时文件和原子替换
+- **合规提示**：不授予访问权，也不声称内容具有版权或授权状态
+
+### ScrapingAnt 公共抓取层
+
+ScrapingAnt 是可选的付费公共页面后备：仅配置 key 不会发起付费请求，必须设置 `SCRAPINGANT_ENABLED=true`；browser 后备只有在获得明确授权并设置 `SCRAPINGANT_ALLOW_BROWSER_ESCALATION=true` 后才开启。默认本地预算为每操作 50 credits、每请求 10 credits，只接受 `datacenter`，拒绝 residential。Google Scholar 使用 `/v2/general`，WoS DOI 发现和 Sci-Hub 后备使用 `/v2/extended`；绝不代理 Clarivate/WoS API。DOI 发现会在本地可见的重定向链中先拒绝已知登录、SSO 和 Clarivate 目标。本地 DNS 校验无法证明远程代理自己的重定向目标安全，因此发现到的链接不是 OA、授权或版权结论；真实 credits 以响应头为准，本地预算不等于供应商账单余额。
+
 ## 🔑 API密钥需求
 
 ### 必需的API密钥
-- **Web of Science**: 需要付费订阅，从[Clarivate Developer Portal](https://developer.clarivate.com/apis)获取
-- **Elsevier**: ScienceDirect和Scopus共用，从[Elsevier Developer Portal](https://dev.elsevier.com/)获取
+- **Web of Science**: 默认使用 `WOS_API_KEY` 的 Starter v2；Expanded 必须使用 `WOS_EXPANDED_API_KEY`，从[Clarivate Developer Portal](https://developer.clarivate.com/apis)获取
+- **ScienceDirect**: 使用 `ELSEVIER_API_KEY`，调用 ScienceDirect Search API v2 的 PUT 接口
+- **Scopus Search**: 推荐使用专用 `SCOPUS_SEARCH_API_KEY`；未配置时回退到 `ELSEVIER_API_KEY`
+- **Scopus 详情/引用**: 使用 `ELSEVIER_API_KEY`，且仍受 Scopus entitlement 限制
 - **Springer Nature**: Meta API v2必需，OpenAccess API可选，从[Springer Developer Portal](https://dev.springernature.com/)获取
 - **Wiley**: 需要TDM令牌，从[Wiley TDM](https://onlinelibrary.wiley.com/library-info/resources/text-and-datamining)获取
 

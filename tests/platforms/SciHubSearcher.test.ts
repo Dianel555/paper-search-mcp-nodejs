@@ -10,7 +10,13 @@ describe('SciHubSearcher', () => {
 
   // Create single instance to avoid multiple health checks
   beforeAll(() => {
-    searcher = new SciHubSearcher();
+    searcher = new SciHubSearcher({ enabled: true });
+  });
+
+  describe('default safety', () => {
+    it('should be disabled unless explicitly enabled', () => {
+      expect(new SciHubSearcher().getCapabilities().search).toBe(false);
+    });
   });
 
   describe('getCapabilities', () => {

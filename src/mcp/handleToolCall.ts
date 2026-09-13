@@ -4,8 +4,9 @@ import { parseToolArgs } from './schemas.js';
 import { PaperFactory, type Paper } from '../models/Paper.js';
 import { PaperSource, type SearchOptions } from '../platforms/PaperSource.js';
 import { CitationService } from '../services/CitationService.js';
-import { sanitizeDownloadPath, sanitizeDoi } from '../utils/SecurityUtils.js';
+import { sanitizeBody, sanitizeDownloadPath, sanitizeDoi, sanitizeSensitiveText } from '../utils/SecurityUtils.js';
 import { logDebug } from '../utils/Logger.js';
+import type { RetrievalOperationContext } from '../retrieval/types.js';
 
 const citationService = new CitationService();
 
@@ -14,16 +15,104 @@ function jsonTextResponse(text: string) {
     content: [
       {
         type: 'text' as const,
-        text
+        text: sanitizeMcpText(text)
       }
     ]
   };
 }
 
+/** Sanitize structured payloads before JSON serialization so escaping stays valid. */
+function sanitizeMcpText(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    return JSON.stringify(sanitizeBody(parsed), null, 2);
+  } catch {
+    // Most tool responses have a human-readable prefix followed by JSON, and
+    // Sci-Hub may append a download message after that JSON. Sanitize the
+    // balanced JSON segment as a value, not as serialized text.
+  }
+
+  const separator = text.indexOf('\n\n');
+  const searchFrom = separator >= 0 ? separator + 2 : 0;
+  const start = findJsonStart(text, searchFrom);
+  if (start >= 0) {
+    const end = findJsonEnd(text, start);
+    if (end !== undefined) {
+      try {
+        const parsed = JSON.parse(text.slice(start, end));
+        return `${sanitizeSensitiveText(text.slice(0, start))}${JSON.stringify(sanitizeBody(parsed), null, 2)}${sanitizeSensitiveText(text.slice(end))}`;
+      } catch {
+        // Fall through to plain-text redaction for non-JSON text.
+      }
+    }
+  }
+  return sanitizeSensitiveText(text);
+}
+
+function findJsonStart(text: string, from: number): number {
+  const objectStart = text.indexOf('{', from);
+  const arrayStart = text.indexOf('[', from);
+  if (objectStart < 0) return arrayStart;
+  if (arrayStart < 0) return objectStart;
+  return Math.min(objectStart, arrayStart);
+}
+
+function getBusinessPlatformEntries(searchers: Searchers): Array<[string, any]> {
+  if (searchers.platforms) return Object.entries(searchers.platforms);
+  const infrastructure = new Set(['wos', 'scholar', 'scrapingAnt', 'publicAccess', 'retrievalService', 'platforms']);
+  return Object.entries(searchers).filter(([name]) => !infrastructure.has(name));
+}
+
+function findJsonEnd(text: string, start: number): number | undefined {
+  const expectedClosers: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index++) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+    } else if (character === '{') {
+      expectedClosers.push('}');
+    } else if (character === '[') {
+      expectedClosers.push(']');
+    } else if (character === '}' || character === ']') {
+      if (expectedClosers.pop() !== character) return undefined;
+      if (expectedClosers.length === 0) return index + 1;
+    }
+  }
+  return undefined;
+}
+
 export async function handleToolCall(
   toolNameRaw: string,
   rawArgs: unknown,
-  searchers: Searchers
+  searchers: Searchers,
+  operationContext?: RetrievalOperationContext
+) {
+  const ownedOperation = operationContext ? undefined : searchers.retrievalService?.createOperation();
+  const operation = operationContext || ownedOperation;
+  try {
+    return await handleToolCallWithContext(toolNameRaw, rawArgs, searchers, operation);
+  } finally {
+    ownedOperation?.dispose?.();
+  }
+}
+
+async function handleToolCallWithContext(
+  toolNameRaw: string,
+  rawArgs: unknown,
+  searchers: Searchers,
+  operation?: RetrievalOperationContext
 ) {
   const toolName = toolNameRaw as ToolName;
   const args = parseToolArgs(toolName, rawArgs);
@@ -56,7 +145,8 @@ export async function handleToolCall(
         fetchDetails,
         fieldsOfStudy,
         sortBy,
-        sortOrder
+        sortOrder,
+        ...(operation ? { operationContext: operation } : {})
       };
 
       if (platform === 'all') {
@@ -78,7 +168,9 @@ export async function handleToolCall(
           throw new Error(`Unsupported platform: ${platform}`);
         }
 
-        const platformResults = await (searcher as PaperSource).search(query, searchOptions);
+        const platformResults = platform === 'webofscience' || platform === 'wos'
+          ? await searchers.webofscience.search(query, { ...searchOptions, apiProduct: 'starter', discoverAccess: false } as any)
+          : await (searcher as PaperSource).search(query, searchOptions);
         results.push(...platformResults.map((paper: Paper) => PaperFactory.toDict(paper)));
       }
 
@@ -106,18 +198,19 @@ export async function handleToolCall(
     }
 
     case 'search_webofscience': {
-      const { query, maxResults, year, author, journal, sortBy, sortOrder } = args;
-      if (!process.env.WOS_API_KEY) {
-        throw new Error('Web of Science API key not configured. Please set WOS_API_KEY environment variable.');
-      }
-
+      const { query, maxResults, year, author, journal, sortBy, sortOrder, apiProduct, recordView, discoverAccess, discoverAccessMaxItems } = args;
       const results = await searchers.webofscience.search(query, {
         maxResults,
         year,
         author,
         journal,
         sortBy,
-        sortOrder
+        sortOrder,
+        apiProduct,
+        recordView,
+        discoverAccess,
+        discoverAccessMaxItems,
+        ...(operation ? { operationContext: operation } : {})
       } as any);
 
       return jsonTextResponse(
@@ -127,6 +220,26 @@ export async function handleToolCall(
           2
         )}`
       );
+    }
+
+    case 'get_webofscience_related_records': {
+      const { uid, relation, maxResults, firstRecord, recordView } = args;
+      const result = await searchers.webofscience.getRelatedRecords(uid, relation, {
+        maxResults,
+        firstRecord,
+        recordView
+      });
+      const itemType = relation === 'references' ? 'reference' : 'paper';
+      const items = relation === 'references'
+        ? result.items
+        : (result.items as Paper[]).map(paper => PaperFactory.toDict(paper));
+      return jsonTextResponse(JSON.stringify({
+        provider: 'webofscience-expanded',
+        relation,
+        itemType,
+        queryResult: result.queryResult,
+        items
+      }, null, 2));
     }
 
     case 'search_pubmed': {
@@ -241,8 +354,14 @@ export async function handleToolCall(
         throw new Error(`Platform ${platform} does not support PDF download`);
       }
 
-      const filePath = await searcher.downloadPdf(paperId, { savePath: resolvedSavePath });
-      return jsonTextResponse(`PDF downloaded successfully to: ${filePath}`);
+      const notice = platform === 'scihub' && typeof searcher.consumeComplianceNotice === 'function'
+        ? searcher.consumeComplianceNotice()
+        : undefined;
+      const filePath = await searcher.downloadPdf(paperId, {
+        savePath: resolvedSavePath,
+        ...(operation ? { operationContext: operation } : {})
+      });
+      return jsonTextResponse(`${notice ? `${notice}\n\n` : ''}PDF downloaded successfully to: ${filePath}`);
     }
 
     case 'search_google_scholar': {
@@ -251,7 +370,8 @@ export async function handleToolCall(
         maxResults,
         yearLow,
         yearHigh,
-        author
+        author,
+        ...(operation ? { operationContext: operation } : {})
       } as any);
 
       return jsonTextResponse(
@@ -273,10 +393,9 @@ export async function handleToolCall(
       const results: Record<string, any>[] = [];
 
       if (platform === 'all') {
-        for (const [platformName, searcher] of Object.entries(searchers)) {
-          if (platformName === 'wos' || platformName === 'scholar') continue;
+        for (const [platformName, searcher] of getBusinessPlatformEntries(searchers)) {
           try {
-            const paper = await (searcher as PaperSource).getPaperByDoi(cleanDoi);
+            const paper = await (searcher as PaperSource).getPaperByDoi(cleanDoi, operation ? { operationContext: operation } : undefined);
             if (paper) {
               results.push(PaperFactory.toDict(paper));
             }
@@ -289,7 +408,7 @@ export async function handleToolCall(
         if (!searcher) {
           throw new Error(`Unsupported platform: ${platform}`);
         }
-        const paper = await searcher.getPaperByDoi(cleanDoi);
+        const paper = await searcher.getPaperByDoi(cleanDoi, operation ? { operationContext: operation } : undefined);
         if (paper) {
           results.push(PaperFactory.toDict(paper));
         }
@@ -301,6 +420,34 @@ export async function handleToolCall(
       return jsonTextResponse(`Found ${results.length} paper(s) with DOI ${cleanDoi}:\n\n${JSON.stringify(results, null, 2)}`);
     }
 
+    case 'discover_paper_access': {
+      const { doi, verifyPdf } = args;
+      const doiResult = sanitizeDoi(doi);
+      if (!doiResult.valid) {
+        throw new Error(doiResult.error || 'Invalid DOI format');
+      }
+      const discoveryPaper = {
+        paperId: `DOI:${doiResult.sanitized}`,
+        title: 'DOI public access discovery',
+        authors: [],
+        abstract: '',
+        doi: doiResult.sanitized,
+        publishedDate: null,
+        pdfUrl: '',
+        url: '',
+        source: 'doi'
+      } as Paper;
+      const [enriched] = await searchers.publicAccess.enrich([discoveryPaper], {
+        verifyPdf,
+        ...(operation ? { operation } : {})
+      });
+      return jsonTextResponse(JSON.stringify({
+        doi: doiResult.sanitized,
+        accessDiscovery: enriched.extra?.accessDiscovery,
+        pdfUrl: enriched.pdfUrl || undefined
+      }));
+    }
+
     case 'search_scihub': {
       const { doiOrUrl, downloadPdf, savePath } = args;
       const pathResult = sanitizeDownloadPath(savePath, './downloads');
@@ -309,20 +456,24 @@ export async function handleToolCall(
       }
       const resolvedSavePath = pathResult.sanitized;
 
-      const results = await searchers.scihub.search(doiOrUrl);
+      const results = await searchers.scihub.search(doiOrUrl, operation ? { operationContext: operation } : undefined);
+      const notice = searchers.scihub.consumeComplianceNotice();
       if (results.length === 0) {
-        return jsonTextResponse(`No paper found on Sci-Hub for: ${doiOrUrl}`);
+        return jsonTextResponse(`${notice ? `${notice}\n\n` : ''}No paper found on Sci-Hub for: ${doiOrUrl}`);
       }
 
       const paper = results[0];
-      let responseText = `Found paper on Sci-Hub:\n\n${JSON.stringify(PaperFactory.toDict(paper), null, 2)}`;
+      let responseText = `${notice ? `${notice}\n\n` : ''}Found paper on Sci-Hub:\n\n${JSON.stringify(PaperFactory.toDict(paper), null, 2)}`;
 
       if (downloadPdf && paper.pdfUrl) {
         try {
-          const filePath = await searchers.scihub.downloadPdf(doiOrUrl, { savePath: resolvedSavePath });
+          const filePath = await searchers.scihub.downloadPdf(doiOrUrl, {
+            savePath: resolvedSavePath,
+            ...(operation ? { operationContext: operation } : {})
+          });
           responseText += `\n\nPDF downloaded successfully to: ${filePath}`;
         } catch (downloadError: any) {
-          responseText += `\n\nFailed to download PDF: ${downloadError.message}`;
+          responseText += `\n\nFailed to download PDF: ${sanitizeSensitiveText(downloadError.message || 'Unknown download error')}`;
         }
       }
 
@@ -333,7 +484,7 @@ export async function handleToolCall(
       const { forceCheck } = args;
 
       if (forceCheck) {
-        await searchers.scihub.forceHealthCheck();
+        await searchers.scihub.forceHealthCheck(operation?.signal);
       }
       const mirrorStatus = searchers.scihub.getMirrorStatus();
       return jsonTextResponse(`Sci-Hub Mirror Status:\n\n${JSON.stringify(mirrorStatus, null, 2)}`);
@@ -388,10 +539,6 @@ export async function handleToolCall(
 
     case 'search_scopus': {
       const { query, maxResults, year, author, journal, affiliation, subject, openAccess, documentType } = args;
-      if (!process.env.ELSEVIER_API_KEY) {
-        throw new Error('Elsevier API key not configured. Please set ELSEVIER_API_KEY environment variable.');
-      }
-
       const results = await searchers.scopus.search(query, {
         maxResults,
         year,
@@ -464,8 +611,19 @@ export async function handleToolCall(
       const { validate } = args;
       const statusInfo: any[] = [];
 
-      for (const [platformName, searcher] of Object.entries(searchers)) {
-        if (platformName === 'wos' || platformName === 'scholar') continue;
+      for (const [platformName, searcher] of getBusinessPlatformEntries(searchers)) {
+
+        if (platformName === 'webofscience') {
+          const wosStatus = await searchers.webofscience.getStatus(validate);
+          statusInfo.push({
+            platform: platformName,
+            baseUrl: searchers.webofscience.getBaseUrl(),
+            capabilities: searchers.webofscience.getCapabilities(),
+            apiKeyStatus: wosStatus.starter.apiKeyStatus,
+            ...wosStatus
+          });
+          continue;
+        }
 
         const capabilities = (searcher as PaperSource).getCapabilities();
         const hasApiKey = (searcher as PaperSource).hasApiKey();
@@ -492,8 +650,9 @@ export async function handleToolCall(
         if (platformName === 'scihub') {
           const mirrorStatus = searchers.scihub.getMirrorStatus();
           additionalInfo = {
+            ...searchers.scihub.getStatus(),
             mirrorCount: mirrorStatus.length,
-            workingMirrors: mirrorStatus.filter(m => m.status === 'Working').length
+            workingMirrors: mirrorStatus.filter(m => m.status === 'working').length
           };
         }
 
@@ -506,6 +665,10 @@ export async function handleToolCall(
         });
       }
 
+      statusInfo.push({
+        platform: 'scrapingant',
+        ...(searchers.scrapingAnt?.getStatus() || searchers.webofscience.getScrapingAntStatus())
+      });
       return jsonTextResponse(`Platform Status:\n\n${JSON.stringify(statusInfo, null, 2)}`);
     }
 

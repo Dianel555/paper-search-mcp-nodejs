@@ -152,6 +152,53 @@ describe('ErrorHandler.retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(3);
   });
 
+  it('should cancel an injected backoff wait without starting another attempt', async () => {
+    const error = { response: { status: 503 }, status: 503 };
+    const mockFn = jest.fn<() => Promise<string>>().mockRejectedValue(error);
+    const controller = new AbortController();
+    let sleepStarted!: () => void;
+    const enteredSleep = new Promise<void>(resolve => {
+      sleepStarted = resolve;
+    });
+    const sleep = jest.fn(async (_milliseconds: number, signal?: AbortSignal) => {
+      sleepStarted();
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new Error('aborted'));
+          return;
+        }
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        void resolve;
+      });
+    });
+
+    const pending = ErrorHandler.retryWithBackoff(mockFn, {
+      maxRetries: 2,
+      initialDelayMs: 10,
+      sleep,
+      random: () => 0,
+      signal: controller.signal
+    });
+    await sleepStarted;
+    controller.abort();
+    await expect(pending).rejects.toThrow(/aborted/i);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports an injected retry predicate without changing default callers', async () => {
+    const error = { response: { status: 500 }, status: 500 };
+    const mockFn = jest.fn<() => Promise<string>>().mockRejectedValue(error);
+    const shouldRetry = jest.fn(() => false);
+
+    await expect(ErrorHandler.retryWithBackoff(mockFn, {
+      shouldRetry,
+      sleep: async () => undefined
+    })).rejects.toEqual(error);
+    expect(shouldRetry).toHaveBeenCalledTimes(1);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
   it('should use exponential backoff with jitter', async () => {
     const error = {
       response: { status: 429 },

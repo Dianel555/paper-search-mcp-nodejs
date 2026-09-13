@@ -11,6 +11,9 @@ import {
   validateQueryComplexity,
   withTimeout,
   sanitizeRequest,
+  sanitizeSensitiveText,
+  sanitizeBody,
+  sanitizeUrl,
   maskSensitiveData,
   sanitizeDownloadPath,
   sanitizeFilename
@@ -140,7 +143,7 @@ describe('SecurityUtils', () => {
     });
 
     it('should reject on timeout', async () => {
-      const slowPromise = new Promise(resolve => setTimeout(resolve, 2000));
+      const slowPromise = new Promise<never>(() => undefined);
       await expect(withTimeout(slowPromise, 100, 'Timeout!')).rejects.toThrow('Timeout!');
     });
 
@@ -164,6 +167,19 @@ describe('SecurityUtils', () => {
       expect(sanitized.headers['Content-Type']).toBe('application/json');
     });
 
+    it('should mask session and SAML headers', () => {
+      const config = {
+        headers: {
+          'X-Session': 'session-secret',
+          'SAML': 'saml-secret'
+        }
+      };
+      const sanitized = sanitizeRequest({ ...config, data: { auth: 'auth-secret' } });
+      expect(sanitized.headers['X-Session']).toBe('***REDACTED***');
+      expect(sanitized.headers.SAML).toBe('***REDACTED***');
+      expect(sanitized.data.auth).toBe('***REDACTED***');
+    });
+
     it('should mask Authorization headers', () => {
       const config = {
         headers: {
@@ -184,12 +200,66 @@ describe('SecurityUtils', () => {
       const sanitized = sanitizeRequest(config);
       expect(sanitized.params.api_key).toContain('***');
       expect(sanitized.params.query).toBe('machine learning');
+      expect(sanitizeRequest({ params: { author: 'Alice' } }).params.author).toBe('Alice');
+      expect(sanitizeUrl('https://example.com/article?author=Alice')).toBe('https://example.com/article?author=Alice');
+    });
+
+    it('should mask session, JWT, SSO, and SAML URL parameters', () => {
+      const sanitized = sanitizeUrl('https://example.com/article?session=session-secret&jwt=jwt-secret&sso=sso-secret&saml=saml-secret');
+      for (const secret of ['session-secret', 'jwt-secret', 'sso-secret', 'saml-secret']) {
+        expect(sanitized).not.toContain(secret);
+      }
     });
 
     it('should handle null/undefined config', () => {
       // sanitizeRequest returns the input as-is for null/undefined
       expect(sanitizeRequest(null)).toBeNull();
       expect(sanitizeRequest(undefined)).toBeUndefined();
+    });
+  });
+
+  describe('sanitizeSensitiveText', () => {
+    it('preserves prose that starts with Basic while redacting an unquoted auth token', () => {
+      expect(sanitizeBody('Basic "concept"')).toBe('Basic "concept"');
+      expect(sanitizeBody('Basic basic-secret')).toBe('Basic ***');
+    });
+
+    it('preserves bibliographic authors while redacting explicit credential keys', () => {
+      const sanitized = sanitizeBody({
+        authors: ['Alice', 'Bob'],
+        authorization: 'Bearer secret-token',
+        apiKey: 'api-secret',
+        title: 'A paper'
+      });
+      expect(sanitized.authors).toEqual(['Alice', 'Bob']);
+      expect(sanitized.authorization).toBe('***REDACTED***');
+      expect(sanitized.apiKey).toBe('***REDACTED***');
+      expect(sanitized.title).toBe('A paper');
+    });
+
+    it('removes credentials from headers, query strings, URLs, and auth schemes', () => {
+      const sanitized = sanitizeSensitiveText([
+        'x-api-key=api-secret',
+        'Authorization: Bearer bearer-secret',
+        'Cookie: lang=en; session=session-secret',
+        'SAML: saml-secret',
+        'auth: auth-secret',
+        'x-auth-token: auth-token-secret',
+        'https://user:password@example.com/article?jwt=jwt-secret',
+        'Basic basic-secret'
+      ].join('\\n'));
+
+      for (const secret of ['api-secret', 'bearer-secret', 'session-secret', 'saml-secret', 'auth-secret', 'auth-token-secret', 'password', 'jwt-secret', 'basic-secret']) {
+        expect(sanitized).not.toContain(secret);
+      }
+    });
+
+    it('preserves JSON delimiters while redacting embedded credentials', () => {
+      const sanitized = sanitizeSensitiveText('{"url":"https://example.com/?session=session-secret","authorization":"Bearer bearer-secret","cookie":"a,b=secret"}');
+      expect(() => JSON.parse(sanitized)).not.toThrow();
+      expect(sanitized).not.toContain('session-secret');
+      expect(sanitized).not.toContain('bearer-secret');
+      expect(sanitized).not.toContain('b=secret');
     });
   });
 

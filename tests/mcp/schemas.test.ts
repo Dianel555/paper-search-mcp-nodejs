@@ -35,6 +35,33 @@ describe('parseToolArgs', () => {
     });
   });
 
+  describe('search_webofscience', () => {
+    it('defaults to Starter and rejects unsupported Starter recordView', () => {
+      const args = parseToolArgs('search_webofscience', { query: 'test' });
+      expect(args.apiProduct).toBe('starter');
+      expect(args.discoverAccess).toBe(false);
+      expect(() => parseToolArgs('search_webofscience', { query: 'test', recordView: 'full' })).toThrow();
+    });
+
+    it('allows search results above the independent discovery limit', () => {
+      const args = parseToolArgs('search_webofscience', { query: 'test', discoverAccess: true, maxResults: 6 });
+      expect(args.maxResults).toBe(6);
+    });
+
+    it('bounds the independent discovery limit', () => {
+      expect(() => parseToolArgs('search_webofscience', { query: 'test', discoverAccess: true, discoverAccessMaxItems: 101 })).toThrow(/discoverAccessMaxItems/i);
+    });
+  });
+
+  describe('get_webofscience_related_records', () => {
+    it('applies relationship defaults and rejects recordView for references', () => {
+      const args = parseToolArgs('get_webofscience_related_records', { uid: 'WOS:1', relation: 'citing' });
+      expect(args.maxResults).toBe(50);
+      expect(args.firstRecord).toBe(1);
+      expect(() => parseToolArgs('get_webofscience_related_records', { uid: 'WOS:1', relation: 'references', recordView: 'full' })).toThrow();
+    });
+  });
+
   describe('download_paper', () => {
     it('should require paperId and platform', () => {
       expect(() => parseToolArgs('download_paper', { platform: 'arxiv' })).toThrow();
@@ -72,6 +99,19 @@ describe('parseToolArgs', () => {
     it('should apply platform default', () => {
       const args = parseToolArgs('get_paper_by_doi', { doi: '10.1038/nature12373' });
       expect(args.platform).toBe('all');
+    });
+  });
+
+  describe('discover_paper_access', () => {
+    it('accepts DOI-only inputs and defaults verification off', () => {
+      const args = parseToolArgs('discover_paper_access', { doi: 'https://doi.org/10.1038/nature12373' });
+      expect(args.verifyPdf).toBe(false);
+    });
+
+    it('rejects arbitrary URLs, DOI userinfo, and unknown fields', () => {
+      expect(() => parseToolArgs('discover_paper_access', { doi: 'https://publisher.example/article' })).toThrow(/DOI/i);
+      expect(() => parseToolArgs('discover_paper_access', { doi: 'https://user:pass@doi.org/10.1038/nature12373' })).toThrow(/DOI/i);
+      expect(() => parseToolArgs('discover_paper_access', { doi: '10.1038/nature12373', provider: 'scrapingant' })).toThrow();
     });
   });
 

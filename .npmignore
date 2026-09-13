@@ -42,8 +42,13 @@ jest.config.*
 .claude/
 claudedocs/
 
+#Pi
+.pi/
+
 #openspec
 openspec/
+
+.ace-tool/
 
 # Logs
 logs/
