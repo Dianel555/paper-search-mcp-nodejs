@@ -117,7 +117,9 @@ class LegacySciHubFallbackProvider implements RetrievalProvider {
     iframeDocuments: true,
     pdfCandidates: true,
     browser: true,
-    paid: true
+    paid: true,
+    proxyTypes: ['datacenter'],
+    combinations: ['static:datacenter', 'browser:datacenter']
   } as const;
 
   constructor(private readonly fetcher: SciHubFallbackFetcher) {}
@@ -127,6 +129,13 @@ class LegacySciHubFallbackProvider implements RetrievalProvider {
       throw new RetrievalError({
         code: 'invalid_request',
         message: 'The compatibility provider only supports paid Sci-Hub retrieval',
+        provider: this.name
+      });
+    }
+    if ((request.proxyType ?? 'datacenter') !== 'datacenter') {
+      throw new RetrievalError({
+        code: 'configuration',
+        message: 'The legacy Sci-Hub provider does not support residential retrieval',
         provider: this.name
       });
     }
@@ -229,7 +238,8 @@ export class SciHubSearcher extends PaperSource {
   private healthFlight: HealthFlight | null = null;
   private healthFlightSequence = 0;
   private lastSuccessfulMirror?: string;
-  private readonly browserPdfCache = new WeakMap<object, Map<string, string>>();
+  /** Bounded domain-result cache for same-operation search→download reuse. */
+  private readonly operationPdfCache = new WeakMap<object, Map<string, string>>();
   private lastLookupStatus: SciHubLookupStatus = 'not_checked';
   private complianceNoticeEmitted = false;
 
@@ -292,7 +302,7 @@ export class SciHubSearcher extends PaperSource {
   async downloadPdf(paperId: string, options?: DownloadOptions): Promise<string> {
     this.requireEnabled();
     const suppliedOperation = options?.operationContext;
-    const ownedOperation = suppliedOperation ? undefined : this.retrievalService.createOperation();
+    const ownedOperation = suppliedOperation ? undefined : this.retrievalService.createOperation({ purpose: 'scihub_lookup' });
     const operation = suppliedOperation || ownedOperation!;
     try {
       return await this.downloadPdfWithOperation(paperId, options, operation);
@@ -325,8 +335,8 @@ export class SciHubSearcher extends PaperSource {
       }
     }
 
-    const cachedBrowserPdf = this.browserPdfCache.get(operation as object)?.get(doi);
-    const paper = cachedBrowserPdf ? { pdfUrl: cachedBrowserPdf } as Paper : await this.fetchPaperInfo(doi, operation);
+    const cachedPdf = this.operationPdfCache.get(operation as object)?.get(doi);
+    const paper = cachedPdf ? { pdfUrl: cachedPdf } as Paper : await this.fetchPaperInfo(doi, operation);
     if (operation.signal.aborted || operation.remainingMs() <= 0) throwIfOperationUnavailable(operation);
     if (!paper?.pdfUrl) {
       throw new Error(`Cannot find a PDF for DOI (lookup status: ${this.lastLookupStatus})`);
@@ -466,7 +476,7 @@ export class SciHubSearcher extends PaperSource {
 
   private async fetchPaperInfo(doi: string, operationContext?: RetrievalOperationContext): Promise<Paper | null> {
     const suppliedOperation = operationContext;
-    const ownedOperation = suppliedOperation ? undefined : this.retrievalService.createOperation();
+    const ownedOperation = suppliedOperation ? undefined : this.retrievalService.createOperation({ purpose: 'scihub_lookup' });
     const operation = suppliedOperation || ownedOperation!;
     try {
       return await this.fetchPaperInfoWithRetrieval(doi, operation);
@@ -483,11 +493,11 @@ export class SciHubSearcher extends PaperSource {
       this.lastLookupStatus = outcome.status;
       if (operation.signal.aborted || operation.remainingMs() <= 0 || outcome.terminal) return null;
       if (outcome.paper) {
-        if (outcome.paper.extra?.method === 'browser' && outcome.paper.pdfUrl) {
-          let cached = this.browserPdfCache.get(operation as object);
+        if (outcome.paper.pdfUrl) {
+          let cached = this.operationPdfCache.get(operation as object);
           if (!cached) {
             cached = new Map<string, string>();
-            this.browserPdfCache.set(operation as object, cached);
+            this.operationPdfCache.set(operation as object, cached);
           }
           cached.set(doi, outcome.paper.pdfUrl);
         }

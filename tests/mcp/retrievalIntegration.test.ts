@@ -104,7 +104,10 @@ function makeSearchers(factory: { createOperation: (...args: any[]) => any; enri
     getPaperByDoi: jest.fn(async () => null),
     getRateLimiterStatus: () => ({ availableTokens: 1, maxTokens: 1 }),
     getStatus: jest.fn(async () => ({})),
-    validateApiKey: jest.fn(async () => true)
+    validateApiKey: jest.fn(async () => true),
+    consumeComplianceNotice: jest.fn(() => undefined),
+    forceHealthCheck: jest.fn(async () => undefined),
+    getMirrorStatus: jest.fn(() => [])
   };
   const wos = {
     ...noOpSearcher,
@@ -178,9 +181,38 @@ describe('MCP retrieval composition', () => {
       { signal: signalController.signal }
     );
 
-    expect(service.createOperation).toHaveBeenCalledWith({ signal: signalController.signal });
+    expect(service.createOperation).toHaveBeenCalledWith({
+      signal: signalController.signal,
+      purpose: 'publisher_discovery'
+    });
     expect(enrich).toHaveBeenCalledTimes(1);
     expect(operation.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps validated tool routes to purpose-specific operation defaults', async () => {
+    const purposes: Array<string | undefined> = [];
+    const service = {
+      createOperation: jest.fn((options: any) => {
+        purposes.push(options.purpose);
+        return makeOperation(options.signal, `purpose-${purposes.length}`);
+      })
+    };
+    const searchers = makeSearchers(service);
+    const handler = createCallToolHandler(() => searchers);
+    const signal = new AbortController().signal;
+
+    await handler({ params: { name: 'search_google_scholar', arguments: { query: 'attention', maxResults: 1 } } }, { signal });
+    await handler({ params: { name: 'search_papers', arguments: { query: 'attention', platform: 'scholar', maxResults: 1 } } }, { signal });
+    await handler({ params: { name: 'discover_paper_access', arguments: { doi: '10.1000/purpose' } } }, { signal });
+    await handler({ params: { name: 'search_webofscience', arguments: { query: 'attention', discoverAccess: true, maxResults: 1 } } }, { signal });
+    await handler({ params: { name: 'search_scihub', arguments: { doiOrUrl: '10.1000/purpose' } } }, { signal });
+    await handler({ params: { name: 'get_paper_by_doi', arguments: { doi: '10.1000/purpose', platform: 'scihub' } } }, { signal });
+    await handler({ params: { name: 'search_papers', arguments: { query: 'attention', platform: 'all', maxResults: 1 } } }, { signal });
+
+    expect(purposes).toEqual([
+      'scholar_search', 'scholar_search', 'publisher_discovery', 'publisher_discovery',
+      'scihub_lookup', 'scihub_lookup', undefined
+    ]);
   });
 
   it('isolates operation signals and ledgers across independent MCP calls', async () => {
@@ -534,8 +566,8 @@ describe('MCP retrieval composition', () => {
         capabilities: { html: true, iframeDocuments: true, pdfCandidates: true, browser: true, paid: true },
         retrieve: paid
       },
-      configuration: paidConfiguration(10),
-      costPolicy: new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true }),
+      configuration: paidConfiguration(1),
+      costPolicy: new RetrievalCostPolicy({ budget: 1, maxCreditsPerRequest: 10, enabled: true }),
       securityPolicy: integrationSecurityPolicy()
     });
     const discovery = new PublicAccessDiscovery(undefined, {
@@ -594,7 +626,9 @@ describe('MCP retrieval composition', () => {
       requestCount: 3,
       admissionUsed: 1,
       unknownCostAttempts: 1,
-      paidClosed: true
+      paidClosed: true,
+      paidClosedReason: 'operation_budget_exceeded',
+      reportedCreditsKnown: false
     }));
     expect(operation.signal.aborted).toBe(true);
   });
@@ -790,27 +824,36 @@ describe('MCP retrieval composition', () => {
         name: 'direct',
         capabilities: { html: true, iframeDocuments: false, pdfCandidates: false, browser: false, paid: false },
         retrieve: jest.fn(async (request: any) => ({
-          provider: 'direct',
-          strategy: 'direct',
-          targetStatus: 200,
-          document: {
-            kind: 'html',
-            html: request.url.endsWith('/p3-stalled')
-              ? '<div id="pdf"></div><script src="/viewer.js"></script>'
-              : '<a href="https://publisher.example/p3-fast.pdf">PDF</a>',
-            iframes: [],
-            source: { provenance: 'trusted_direct', finalUrl: request.url },
-            targetStatus: 200
-          },
-          cost: { known: true, credits: 0 }
-        } satisfies RetrievalResponse))
+            provider: 'direct',
+            strategy: 'direct',
+            targetStatus: 200,
+            document: {
+              kind: 'html',
+              html: request.url.endsWith('/p3-stalled')
+                ? '<div id="pdf"></div><script src="/viewer.js"></script>'
+                : '<a href="https://publisher.example/p3-fast.pdf">PDF</a>',
+              iframes: [],
+              source: { provenance: 'trusted_direct', finalUrl: request.url },
+              targetStatus: 200
+            },
+            cost: { known: true, credits: 0 }
+          } satisfies RetrievalResponse))
       };
       const paidProvider: RetrievalProvider = {
         name: 'scrapingant',
-        capabilities: { html: true, iframeDocuments: true, pdfCandidates: true, browser: true, paid: true },
+        capabilities: {
+          html: true,
+          iframeDocuments: true,
+          pdfCandidates: true,
+          browser: true,
+          paid: true,
+          dispatchObservation: true,
+          transportSlotManagement: false
+        },
         retrieve: jest.fn(async (request: any, context: RetrievalOperationContext) => {
           paidContexts.push(context);
           paidStrategies.push(request.strategy);
+          request.dispatchObserver?.onDispatch?.({ role: 'provider_api', origin: 'https://publisher.example', submittedAt: Date.now() });
           paidStartedResolve();
           return paidContexts.length === 1 ? latePaid : lateResponse;
         })
@@ -845,12 +888,12 @@ describe('MCP retrieval composition', () => {
       const detachedBaseline = structuredCloneInCurrentRealm(returned);
 
       expect(enriched[0].extra?.accessDiscovery).toEqual(expect.objectContaining({
-        status: 'pdf_verified',
+        status: 'oa_candidate',
         evidence: expect.objectContaining({
           url: 'https://publisher.example/p3-fast.pdf',
           source: expect.objectContaining({ provenance: 'trusted_direct' })
         }),
-        verification: expect.objectContaining({ status: 'verified', finalUrl: 'https://publisher.example/p3-fast.pdf' })
+        verification: expect.objectContaining({ status: 'inconclusive', reason: 'aborted_or_timeout' })
       }));
       expect(enriched[1].extra?.accessDiscovery).toEqual(expect.objectContaining({
         status: 'not_found',
@@ -862,8 +905,8 @@ describe('MCP retrieval composition', () => {
         admissionUsed: 1,
         reportedCredits: 0,
         unknownCostAttempts: 1,
-        paidClosed: true,
-        paidClosedReason: 'unknown_cost'
+        paidClosed: false,
+        reportedCreditsKnown: false
       }));
       expect(returned.diagnostics).toEqual(expect.objectContaining({ unknownCostAttempts: 1 }));
       expect(returned.process).toEqual(expect.objectContaining({
@@ -1173,8 +1216,9 @@ describe('MCP retrieval composition', () => {
     });
     const scholar = {
       search: jest.fn(async (_query: string, options: any) => {
+        let requestNumber = 0;
         const request = (): any => ({
-          url: 'https://publisher.example/page',
+          url: `https://example.com/page?attempt=${requestNumber++}`,
           purpose: 'publisher_discovery',
           strategy: 'static',
           documentFormat: 'html',
@@ -1185,7 +1229,7 @@ describe('MCP retrieval composition', () => {
         return [];
       })
     };
-    const searchers = { ...makeSearchers({ createOperation: jest.fn() }), googlescholar: scholar, retrievalService: service } as any;
+    const searchers = { ...makeSearchers(service), googlescholar: scholar, retrievalService: service } as any;
     const handler = createCallToolHandler(() => searchers);
 
     const [first, second] = await Promise.all([
@@ -1406,8 +1450,8 @@ describe('MCP retrieval composition', () => {
         operationContext: operation
       })).resolves.toBe(path.join(directory, '10.1000_integration.pdf'));
       expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
-        requestCount: 2,
-        strategyCounts: { direct: 2, static: 0, browser: 0 }
+        requestCount: 1,
+        strategyCounts: { direct: 1, static: 0, browser: 0 }
       }));
       expect(healthHttpClient.request).toHaveBeenCalledTimes(5);
       expect(download).toHaveBeenCalledWith(pdfUrl, expect.objectContaining({ signal: operation.signal }));
@@ -1500,13 +1544,13 @@ describe('MCP retrieval composition', () => {
         savePath: directory,
         operationContext: operation
       })).resolves.toBe(path.join(directory, '10.1000_paid-integration.pdf'));
-      expect(paidProvider.retrieve).toHaveBeenCalledTimes(2);
+      expect(paidProvider.retrieve).toHaveBeenCalledTimes(1);
       expect(new Set(paidContexts)).toEqual(new Set([operation]));
       expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
-        requestCount: 8,
-        strategyCounts: { direct: 6, static: 2, browser: 0 },
-        admissionUsed: 2,
-        reportedCredits: 2,
+        requestCount: 4,
+        strategyCounts: { direct: 3, static: 1, browser: 0 },
+        admissionUsed: 1,
+        reportedCredits: 1,
         paidClosed: false
       }));
       expect(healthHttpClient.request).toHaveBeenCalledTimes(5);
@@ -1780,7 +1824,7 @@ describe('MCP retrieval composition', () => {
         return [];
       })
     };
-    const searchers = { ...makeSearchers({ createOperation: jest.fn() }), googlescholar: scholar, retrievalService: service } as any;
+    const searchers = { ...makeSearchers(service), googlescholar: scholar, retrievalService: service } as any;
     const handler = createCallToolHandler(() => searchers);
     const cancelled = new AbortController();
     const sibling = new AbortController();

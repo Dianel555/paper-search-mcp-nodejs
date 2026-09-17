@@ -1,14 +1,17 @@
-import type {
-  RetrievalCostController,
-  RetrievalCostObservation,
-  RetrievalCostReservation,
-  RetrievalCostSnapshot,
-  RetrievalStrategy
+import {
+  normalizeRetrievalCombination,
+  type RetrievalCombination,
+  type RetrievalCostController,
+  type RetrievalCostObservation,
+  type RetrievalCostReservation,
+  type RetrievalCostSnapshot,
+  type RetrievalProxyType,
+  type RetrievalStrategy
 } from './types.js';
 
 export type RetrievalPriceEstimate =
   | { readonly known: true; readonly credits: number }
-  | { readonly known: false; readonly reason: 'pricing_unknown' | 'invalid_url' };
+  | { readonly known: false; readonly reason: 'pricing_unknown' | 'invalid_url' | 'invalid_combination' };
 
 export function parseRetrievalCredits(value: unknown): RetrievalCostObservation {
   const text = value === undefined || value === null ? '' : String(value);
@@ -54,22 +57,38 @@ export class RetrievalCostPolicy {
       isPositiveSafeInteger(options.maxCreditsPerRequest ?? this.maxCreditsPerRequest);
   }
 
-  estimate(url: string, strategy: RetrievalStrategy): RetrievalPriceEstimate {
+  estimate(url: string, strategy: RetrievalStrategy, proxyType?: RetrievalProxyType): RetrievalPriceEstimate;
+  estimate(url: string, combination: Pick<RetrievalCombination, 'strategy' | 'proxyType'>): RetrievalPriceEstimate;
+  estimate(
+    url: string,
+    strategyOrCombination: RetrievalStrategy | Pick<RetrievalCombination, 'strategy' | 'proxyType'>,
+    proxyType: RetrievalProxyType = 'datacenter'
+  ): RetrievalPriceEstimate {
+    const combination = typeof strategyOrCombination === 'string'
+      ? normalizeRetrievalCombination(strategyOrCombination, proxyType)
+      : normalizeRetrievalCombination(strategyOrCombination.strategy, strategyOrCombination.proxyType);
+    if (!combination) return { known: false, reason: 'invalid_combination' };
+
     const hostname = normalizeHostname(url);
     if (!hostname) return { known: false, reason: 'invalid_url' };
-    if (strategy === 'direct') return { known: true, credits: 0 };
+    if (combination.strategy === 'direct') return { known: true, credits: 0 };
 
     const googleClass = classifyGoogleHost(hostname);
-    if (googleClass === 'known') return { known: true, credits: 10 };
     if (googleClass === 'unknown') return { known: false, reason: 'pricing_unknown' };
-    return { known: true, credits: strategy === 'browser' ? 10 : 1 };
+    if (googleClass === 'known' && combination.proxyType === 'datacenter') {
+      return { known: true, credits: 10 };
+    }
+    if (combination.proxyType === 'residential') {
+      return { known: true, credits: combination.strategy === 'browser' ? 125 : 25 };
+    }
+    return { known: true, credits: combination.strategy === 'browser' ? 10 : 1 };
   }
 
-  createLedger(): RetrievalCostLedger {
+  createLedger(options: Partial<LedgerOptions> = {}): RetrievalCostLedger {
     return new RetrievalCostLedger({
-      budget: this.budget,
-      maxCreditsPerRequest: this.maxCreditsPerRequest,
-      enabled: this.enabled
+      budget: options.budget ?? this.budget,
+      maxCreditsPerRequest: options.maxCreditsPerRequest ?? this.maxCreditsPerRequest,
+      enabled: options.enabled ?? this.enabled
     });
   }
 }
@@ -115,12 +134,26 @@ export class RetrievalCostLedger implements RetrievalCostController {
   }
 
   /** Admit a priced strategy, closing the operation when pricing is unknown. */
-  admit(url: string, strategy: RetrievalStrategy, policy = new RetrievalCostPolicy({
-    budget: this.budget,
-    maxCreditsPerRequest: this.maxCreditsPerRequest,
-    enabled: this.enabled
-  })): RetrievalCostReservation | null {
-    const estimate = policy.estimate(url, strategy);
+  admit(url: string, strategy: RetrievalStrategy, policy?: RetrievalCostPolicy): RetrievalCostReservation | null;
+  admit(url: string, strategy: RetrievalStrategy, proxyType: RetrievalProxyType, policy?: RetrievalCostPolicy): RetrievalCostReservation | null;
+  admit(url: string, combination: Pick<RetrievalCombination, 'strategy' | 'proxyType'>, policy?: RetrievalCostPolicy): RetrievalCostReservation | null;
+  admit(
+    url: string,
+    strategyOrCombination: RetrievalStrategy | Pick<RetrievalCombination, 'strategy' | 'proxyType'>,
+    proxyTypeOrPolicy?: RetrievalProxyType | RetrievalCostPolicy,
+    policy?: RetrievalCostPolicy
+  ): RetrievalCostReservation | null {
+    const proxyType = typeof proxyTypeOrPolicy === 'string' ? proxyTypeOrPolicy : 'datacenter';
+    const pricingPolicy = isCostPolicy(proxyTypeOrPolicy)
+      ? proxyTypeOrPolicy
+      : policy || new RetrievalCostPolicy({
+        budget: this.budget,
+        maxCreditsPerRequest: this.maxCreditsPerRequest,
+        enabled: this.enabled
+      });
+    const estimate = typeof strategyOrCombination === 'string'
+      ? pricingPolicy.estimate(url, strategyOrCombination, proxyType)
+      : pricingPolicy.estimate(url, strategyOrCombination);
     if (!estimate.known) {
       this.close(estimate.reason);
       return null;
@@ -138,12 +171,16 @@ export class RetrievalCostLedger implements RetrievalCostController {
       this.close('request_cost_limit');
       return null;
     }
+    if (this.admissionUsed + estimate > this.budget) {
+      // This request cannot fit even if every other outstanding reservation is
+      // released. That is persistent exhaustion and closes paid admission.
+      this.close('operation_budget_exceeded');
+      return null;
+    }
     if (this.admissionUsed + this.reservedCredits + estimate > this.budget) {
-      // A concurrent reservation may be consuming the last available unit.
-      // Reject only this contender; closing here would invalidate the already
-      // admitted attempt when it reaches markDispatched(). Once no reservation
-      // is in flight, the same condition closes future paid admission.
-      if (this.reservedCredits === 0) this.close('operation_budget_exceeded');
+      // Another outstanding reservation temporarily consumes the remaining
+      // capacity. Reject only this contender; already admitted work remains
+      // eligible for its own submit-time recheck.
       return null;
     }
 
@@ -166,7 +203,23 @@ export class RetrievalCostLedger implements RetrievalCostController {
           this.release(state);
           return false;
         }
+        // Settlement of another attempt can consume headroom while this
+        // reservation is queued. This check is deliberately synchronous with
+        // the dispatch marker and therefore cannot be bypassed by an await.
+        if (this.admissionUsed + this.reservedCredits > this.budget) {
+          this.release(state);
+          if (this.admissionUsed + state.estimate > this.budget) {
+            this.close('operation_budget_exceeded');
+          }
+          return false;
+        }
         state.dispatched = true;
+        return true;
+      },
+      cancelBeforeTransport: () => {
+        if (state.released || state.settled || !state.dispatched) return false;
+        state.dispatched = false;
+        this.release(state);
         return true;
       },
       release: () => this.release(state)
@@ -191,10 +244,12 @@ export class RetrievalCostLedger implements RetrievalCostController {
       state.pendingReconciliation = undefined;
     } else {
       state.unknownCost = true;
+      // Unknown provider billing consumes the local estimate and remains
+      // visible, but it is not itself a reason to stop an otherwise bounded
+      // retry/fallback chain. Budget and request-limit admission still apply.
       this.admissionUsed += state.estimate;
       this.unknownCostAttempts++;
       this.reportedCreditsKnown = false;
-      this.close('unknown_cost');
       const pending = state.pendingReconciliation;
       state.pendingReconciliation = undefined;
       if (pending) this.reconcile(reservation, pending);
@@ -296,6 +351,10 @@ function isRootOrSubdomain(hostname: string, root: string): boolean {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isCostPolicy(value: unknown): value is RetrievalCostPolicy {
+  return value instanceof RetrievalCostPolicy;
 }
 
 export default RetrievalCostPolicy;

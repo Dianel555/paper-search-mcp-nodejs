@@ -21,6 +21,7 @@ pids
 *.pid
 *.seed
 *.pid.lock
+.retrieval-benchmark-runs/
 
 # Coverage directory used by tools like istanbul
 coverage/
@@ -132,6 +133,7 @@ test-*.js
 # Local development files
 scratch/
 temp/
+benchmark.md
 
 # MCP server debugging
 debug-*.js

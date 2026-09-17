@@ -1,0 +1,237 @@
+{
+  "corpusVersion": "03f9f62fe6df7ed3d5a32c2d18dda88e8d0e0982c0f9ab47cc4719157864d883",
+  "publisher": [
+    {
+      "sampleId": "pub-01",
+      "kind": "publisher",
+      "doi": "10.1371/journal.pone.0198468",
+      "expectedTitle": "Eliciting improved quantitative judgements using the IDEA protocol: A case study in natural resource management",
+      "evidenceUrl": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0198468",
+      "candidateUrls": ["https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0198468&type=printable"]
+    },
+    {
+      "sampleId": "pub-02",
+      "kind": "publisher",
+      "doi": "10.1371/journal.pone.0205194",
+      "expectedTitle": "Oral carbon monoxide therapy in murine sickle cell disease: Beneficial effects on vaso-occlusion, inflammation and anemia",
+      "evidenceUrl": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0205194",
+      "candidateUrls": ["https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0205194&type=printable"]
+    },
+    {
+      "sampleId": "pub-03",
+      "kind": "publisher",
+      "doi": "10.1371/journal.pone.0201358",
+      "expectedTitle": "How selfish is a thirsty man? A pilot study on comparing sharing behavior with primary and secondary rewards",
+      "evidenceUrl": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0201358",
+      "candidateUrls": ["https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0201358&type=printable"]
+    },
+    {
+      "sampleId": "pub-04",
+      "kind": "publisher",
+      "doi": "10.1371/journal.pone.0205139",
+      "expectedTitle": "First-in-human randomized controlled trial of an oral, replicating adenovirus 26 vector vaccine for HIV-1",
+      "evidenceUrl": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0205139",
+      "candidateUrls": ["https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0205139&type=printable"]
+    },
+    {
+      "sampleId": "pub-05",
+      "kind": "publisher",
+      "doi": "10.1371/journal.pone.0190420",
+      "expectedTitle": "Real-time estimation of horizontal gaze angle by saccade integration using in-ear electrooculography",
+      "evidenceUrl": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0190420",
+      "candidateUrls": ["https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0190420&type=printable"]
+    },
+    {
+      "sampleId": "pub-06",
+      "kind": "publisher",
+      "doi": "10.3389/fpsyg.2019.00374",
+      "expectedTitle": "The Graded Fate of Unattended Stimulus Representations in Visuospatial Working Memory",
+      "evidenceUrl": "https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2019.00374/full",
+      "candidateUrls": ["https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2019.00374/pdf"]
+    },
+    {
+      "sampleId": "pub-07",
+      "kind": "publisher",
+      "doi": "10.3389/fnhum.2019.00028",
+      "expectedTitle": "A Non-cognitive Behavioral Model for Interpreting Functional Neuroimaging Studies",
+      "evidenceUrl": "https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2019.00028/full",
+      "candidateUrls": ["https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2019.00028/pdf"]
+    },
+    {
+      "sampleId": "pub-08",
+      "kind": "publisher",
+      "doi": "10.3389/fpsyg.2019.01561",
+      "expectedTitle": "Hyperscanning and Neural Dynamics of Emotion Processing During Guided Imagery and Music",
+      "evidenceUrl": "https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2019.01561/full",
+      "candidateUrls": ["https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2019.01561/pdf"]
+    },
+    {
+      "sampleId": "pub-09",
+      "kind": "publisher",
+      "doi": "10.3389/fnhum.2019.00340",
+      "expectedTitle": "Brainstem Modulation of Large-Scale Intrinsic Cortical Activity Correlations",
+      "evidenceUrl": "https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2019.00340/full",
+      "candidateUrls": ["https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2019.00340/pdf"]
+    },
+    {
+      "sampleId": "pub-10",
+      "kind": "publisher",
+      "doi": "10.3389/fnins.2019.00248",
+      "expectedTitle": "Fusing Mobile Phone Sensing and Brain Imaging to Assess Depression in College Students",
+      "evidenceUrl": "https://www.frontiersin.org/journals/neuroscience/articles/10.3389/fnins.2019.00248/full",
+      "candidateUrls": ["https://www.frontiersin.org/journals/neuroscience/articles/10.3389/fnins.2019.00248/pdf"]
+    },
+    {
+      "sampleId": "pub-11",
+      "kind": "publisher",
+      "doi": "10.3390/ijerph17010084",
+      "expectedTitle": "Effect of Land Use Conversion on Surface Soil Heavy Metal Contamination in a Typical Karst Plateau Lakeshore Wetland of Southwest China",
+      "evidenceUrl": "https://www.mdpi.com/1660-4601/17/1/84",
+      "candidateUrls": ["https://www.mdpi.com/1660-4601/17/1/84/pdf"]
+    },
+    {
+      "sampleId": "pub-12",
+      "kind": "publisher",
+      "doi": "10.3390/ijerph17134865",
+      "expectedTitle": "Effects of Climate Change on Land Cover Change and Vegetation Dynamics in Xinjiang, China",
+      "evidenceUrl": "https://www.mdpi.com/1660-4601/17/13/4865",
+      "candidateUrls": ["https://www.mdpi.com/1660-4601/17/13/4865/pdf"]
+    },
+    {
+      "sampleId": "pub-13",
+      "kind": "publisher",
+      "doi": "10.3390/ijerph17207384",
+      "expectedTitle": "Soil Phosphorus Pools, Bioavailability and Environmental Risk in Response to the Phosphorus Supply in the Red Soil of Southern China",
+      "evidenceUrl": "https://www.mdpi.com/1660-4601/17/20/7384",
+      "candidateUrls": ["https://www.mdpi.com/1660-4601/17/20/7384/pdf"]
+    },
+    {
+      "sampleId": "pub-14",
+      "kind": "publisher",
+      "doi": "10.3390/ijerph17249214",
+      "expectedTitle": "Metal Fractionation in Surface Sediments of the Brahmaputra River and Implications for Their Mobilization",
+      "evidenceUrl": "https://www.mdpi.com/1660-4601/17/24/9214",
+      "candidateUrls": ["https://www.mdpi.com/1660-4601/17/24/9214/pdf"]
+    },
+    {
+      "sampleId": "pub-15",
+      "kind": "publisher",
+      "doi": "10.3390/ijerph17176131",
+      "expectedTitle": "An Early Warning System for Flood Detection Using Critical Slowing Down",
+      "evidenceUrl": "https://www.mdpi.com/1660-4601/17/17/6131",
+      "candidateUrls": ["https://www.mdpi.com/1660-4601/17/17/6131/pdf"]
+    },
+    {
+      "sampleId": "pub-16",
+      "kind": "publisher",
+      "doi": "10.1186/s12915-019-0675-z",
+      "expectedTitle": "RNA processing errors triggered by cadmium and integrator complex disruption are signals for environmental stress",
+      "evidenceUrl": "https://bmcbiol.biomedcentral.com/articles/10.1186/s12915-019-0675-z",
+      "candidateUrls": ["https://bmcbiol.biomedcentral.com/counter/pdf/10.1186/s12915-019-0675-z.pdf"]
+    },
+    {
+      "sampleId": "pub-17",
+      "kind": "publisher",
+      "doi": "10.1186/s12875-019-0943-6",
+      "expectedTitle": "A multidisciplinary self-management intervention among patients with multimorbidity and the impact of socioeconomic factors on results",
+      "evidenceUrl": "https://bmcprimcare.biomedcentral.com/articles/10.1186/s12875-019-0943-6",
+      "candidateUrls": ["https://bmcprimcare.biomedcentral.com/counter/pdf/10.1186/s12875-019-0943-6.pdf"]
+    },
+    {
+      "sampleId": "pub-18",
+      "kind": "publisher",
+      "doi": "10.1186/s12874-019-0895-5",
+      "expectedTitle": "Using research networks to generate trustworthy qualitative public health research findings from multiple contexts",
+      "evidenceUrl": "https://bmcmedresmethodol.biomedcentral.com/articles/10.1186/s12874-019-0895-5",
+      "candidateUrls": ["https://bmcmedresmethodol.biomedcentral.com/counter/pdf/10.1186/s12874-019-0895-5.pdf"]
+    },
+    {
+      "sampleId": "pub-19",
+      "kind": "publisher",
+      "doi": "10.1186/s13012-020-0972-5",
+      "expectedTitle": "Adapting rapid assessment procedures for implementation research using a team-based approach to analysis: a case example of patient quality and safety interventions in the ICU",
+      "evidenceUrl": "https://implementationscience.biomedcentral.com/articles/10.1186/s13012-020-0972-5",
+      "candidateUrls": ["https://implementationscience.biomedcentral.com/counter/pdf/10.1186/s13012-020-0972-5.pdf"]
+    },
+    {
+      "sampleId": "pub-20",
+      "kind": "publisher",
+      "doi": "10.1186/s12904-020-00647-5",
+      "expectedTitle": "Co-construction of the family-focused support conversation: a participatory learning and action research study to implement support for family members whose relatives are being discharged for end-of-life care at home or in a nursing home",
+      "evidenceUrl": "https://bmcpalliatcare.biomedcentral.com/articles/10.1186/s12904-020-00647-5",
+      "candidateUrls": ["https://bmcpalliatcare.biomedcentral.com/counter/pdf/10.1186/s12904-020-00647-5.pdf"]
+    }
+  ],
+  "scholar": [
+    {
+      "sampleId": "sch-01",
+      "kind": "scholar",
+      "query": "attention mechanisms neural networks",
+      "expected": { "title": "Attention Is All You Need" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=attention+mechanisms+neural+networks"
+    },
+    {
+      "sampleId": "sch-02",
+      "kind": "scholar",
+      "query": "deep residual learning image recognition",
+      "expected": { "title": "Deep Residual Learning for Image Recognition" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=deep+residual+learning+image+recognition"
+    },
+    {
+      "sampleId": "sch-03",
+      "kind": "scholar",
+      "query": "BERT language representation",
+      "expected": { "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=BERT+language+representation"
+    },
+    {
+      "sampleId": "sch-04",
+      "kind": "scholar",
+      "query": "Adam method stochastic optimization",
+      "expected": { "title": "Adam: A Method for Stochastic Optimization" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=Adam+method+stochastic+optimization"
+    },
+    {
+      "sampleId": "sch-05",
+      "kind": "scholar",
+      "query": "ImageNet large scale visual recognition",
+      "expected": { "title": "ImageNet: A large-scale hierarchical image database" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=ImageNet+large+scale+visual+recognition"
+    },
+    {
+      "sampleId": "sch-06",
+      "kind": "scholar",
+      "query": "unreasonable effectiveness of data",
+      "expected": { "title": "The Unreasonable Effectiveness of Data" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=unreasonable+effectiveness+of+data"
+    },
+    {
+      "sampleId": "sch-07",
+      "kind": "scholar",
+      "query": "random forests classification",
+      "expected": { "title": "Random Forests" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=random+forests+classification"
+    },
+    {
+      "sampleId": "sch-08",
+      "kind": "scholar",
+      "query": "generative adversarial nets",
+      "expected": { "title": "Generative Adversarial Nets" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=generative+adversarial+nets"
+    },
+    {
+      "sampleId": "sch-09",
+      "kind": "scholar",
+      "query": "You Only Look Once object detection",
+      "expected": { "title": "You Only Look Once: Unified, Real-Time Object Detection" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=You+Only+Look+Once+object+detection"
+    },
+    {
+      "sampleId": "sch-10",
+      "kind": "scholar",
+      "query": "Monte Carlo tree search survey",
+      "expected": { "title": "A Survey of Monte Carlo Tree Search Methods" },
+      "evidenceUrl": "https://scholar.google.com/scholar?q=Monte+Carlo+tree+search+survey"
+    }
+  ]
+}

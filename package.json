@@ -1,14 +1,26 @@
 {
   "name": "paper-search-mcp-nodejs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A Node.js MCP server for searching and downloading academic papers from multiple sources, including arXiv, PubMed, bioRxiv, Web of Science, and more.",
   "main": "dist/server.js",
+  "files": [
+    "dist/",
+    "assets/",
+    "README.md",
+    "README-sc.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "type": "module",
   "bin": {
     "paper-search-mcp-nodejs": "dist/server.js"
   },
   "scripts": {
-    "build": "npx tsc",
+    "build": "npm run clean && npx tsc",
+    "clean": "node scripts/clean-dist.mjs",
+    "prepack": "npm run build",
+    "benchmark:offline": "tsx scripts/retrieval-benchmark.ts",
+    "benchmark:live": "tsx scripts/retrieval-benchmark.ts --live",
     "start": "node dist/server.js",
     "start:mcp": "tsx src/server.ts",
     "dev": "tsx src/server.ts",
@@ -93,7 +105,7 @@
     "entities": "^6.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.18.1 <21 || >=22"
   },
   "repository": {
     "type": "git",

@@ -162,7 +162,7 @@ export const DiscoverPaperAccessSchema = z
 export const GetPaperByDoiSchema = z
   .object({
     doi: z.string().min(1),
-    platform: z.enum(['arxiv', 'webofscience', 'all']).optional().default('all')
+    platform: z.enum(['arxiv', 'webofscience', 'scihub', 'all']).optional().default('all')
   })
   .strip();
 

@@ -1,7 +1,16 @@
+import type { RetrievalPurpose } from './types.js';
+
 export const DEFAULT_RETRIEVAL_BUDGET = 50;
 export const DEFAULT_RETRIEVAL_REQUEST_LIMIT = 10;
+export const DEFAULT_RESIDENTIAL_RETRIEVAL_BUDGET = 500;
+export const DEFAULT_RESIDENTIAL_RETRIEVAL_REQUEST_LIMIT = 125;
 export const DEFAULT_RETRIEVAL_CONCURRENCY = 1;
 export const DEFAULT_ACCESS_DISCOVERY_MAX_ITEMS = 5;
+
+export interface RetrievalBudgetDefaults {
+  readonly maxCreditsPerOperation: number;
+  readonly maxCreditsPerRequest: number;
+}
 
 export interface ScrapingAntRetrievalConfiguration {
   readonly apiKey?: string;
@@ -9,10 +18,16 @@ export interface ScrapingAntRetrievalConfiguration {
   readonly enabled: boolean;
   readonly paidEnabled: boolean;
   readonly browserAllowed: boolean;
+  /** Explicit residential authorization is independent from the API key. */
+  readonly residentialAllowed: boolean;
   readonly maxCreditsPerOperation: number;
   readonly maxCreditsPerRequest: number;
+  readonly budgetDefaults: Readonly<Record<RetrievalPurpose, RetrievalBudgetDefaults>>;
   readonly maxConcurrency: number;
-  readonly proxyType: 'datacenter';
+  /** Configured proxy ceiling, not the proxy used by every request. */
+  readonly proxyType: 'datacenter' | 'residential';
+  /** Combinations that can be generated before provider capability checks. */
+  readonly availableProxyTypes: readonly ('datacenter' | 'residential')[];
   readonly configurationInvalid: boolean;
 }
 
@@ -30,17 +45,16 @@ export function parseRetrievalConfiguration(
   const apiKey = normalizeSecret(environment.SCRAPINGANT_API_KEY);
   const enabled = isStrictTrue(environment.SCRAPINGANT_ENABLED);
   const browserAllowed = isStrictTrue(environment.SCRAPINGANT_ALLOW_BROWSER_ESCALATION);
+  const residentialAllowed = isStrictTrue(environment.SCRAPINGANT_ALLOW_RESIDENTIAL);
   const invalidFields: string[] = [];
 
-  const maxCreditsPerOperation = parsePositiveSafeInteger(
+  const explicitOperationBudget = parseOptionalPositiveSafeInteger(
     environment.SCRAPINGANT_MAX_CREDITS_PER_OPERATION,
-    DEFAULT_RETRIEVAL_BUDGET,
     'SCRAPINGANT_MAX_CREDITS_PER_OPERATION',
     invalidFields
   );
-  const maxCreditsPerRequest = parsePositiveSafeInteger(
+  const explicitRequestLimit = parseOptionalPositiveSafeInteger(
     environment.SCRAPINGANT_MAX_CREDITS_PER_REQUEST,
-    DEFAULT_RETRIEVAL_REQUEST_LIMIT,
     'SCRAPINGANT_MAX_CREDITS_PER_REQUEST',
     invalidFields
   );
@@ -54,19 +68,32 @@ export function parseRetrievalConfiguration(
   );
 
   const configuredProxy = environment.SCRAPINGANT_PROXY_TYPE?.trim().toLowerCase();
-  if (configuredProxy && configuredProxy !== 'datacenter') {
-    invalidFields.push('SCRAPINGANT_PROXY_TYPE');
-    warnings.push('SCRAPINGANT_PROXY_TYPE must be datacenter; paid retrieval is disabled for unsupported proxy types');
+  let proxyType: 'datacenter' | 'residential' = 'datacenter';
+  if (configuredProxy) {
+    if (configuredProxy === 'datacenter' || configuredProxy === 'residential') {
+      proxyType = configuredProxy;
+    } else {
+      invalidFields.push('SCRAPINGANT_PROXY_TYPE');
+      warnings.push('SCRAPINGANT_PROXY_TYPE must be datacenter or residential; paid retrieval is disabled for unsupported proxy types');
+    }
+  }
+  if (proxyType === 'residential' && !residentialAllowed) {
+    invalidFields.push('SCRAPINGANT_ALLOW_RESIDENTIAL');
+    warnings.push('Residential proxy selection requires SCRAPINGANT_ALLOW_RESIDENTIAL=true; paid retrieval is disabled');
   }
 
   for (const field of invalidFields) {
-    if (field !== 'SCRAPINGANT_PROXY_TYPE') {
+    if (field !== 'SCRAPINGANT_PROXY_TYPE' && field !== 'SCRAPINGANT_ALLOW_RESIDENTIAL') {
       warnings.push(`${field} is invalid; paid retrieval is disabled`);
     }
   }
 
+  const budgetDefaults = createBudgetDefaults(residentialAllowed, explicitOperationBudget, explicitRequestLimit);
   const configurationInvalid = invalidFields.length > 0;
   const paidEnabled = Boolean(apiKey && enabled && !configurationInvalid);
+  const availableProxyTypes = proxyType === 'residential' && residentialAllowed
+    ? ['datacenter', 'residential'] as const
+    : ['datacenter'] as const;
   const accessDiscoveryMaxItems = parseDiscoveryDefault(
     environment.ACCESS_DISCOVERY_MAX_ITEMS,
     warnings
@@ -79,14 +106,47 @@ export function parseRetrievalConfiguration(
       enabled,
       paidEnabled,
       browserAllowed: paidEnabled && browserAllowed,
-      maxCreditsPerOperation,
-      maxCreditsPerRequest,
+      residentialAllowed,
+      maxCreditsPerOperation: budgetDefaults.unknown.maxCreditsPerOperation,
+      maxCreditsPerRequest: budgetDefaults.unknown.maxCreditsPerRequest,
+      budgetDefaults,
       maxConcurrency,
-      proxyType: 'datacenter',
+      proxyType,
+      availableProxyTypes,
       configurationInvalid
     },
     accessDiscoveryMaxItems,
     warnings
+  };
+}
+
+export function getRetrievalBudgetDefaults(
+  configuration: RetrievalConfiguration,
+  purpose: RetrievalPurpose = 'unknown'
+): RetrievalBudgetDefaults {
+  return configuration.scrapingAnt.budgetDefaults[purpose]
+    || configuration.scrapingAnt.budgetDefaults.unknown;
+}
+
+function createBudgetDefaults(
+  residentialAllowed: boolean,
+  explicitOperationBudget: number | undefined,
+  explicitRequestLimit: number | undefined
+): Readonly<Record<RetrievalPurpose, RetrievalBudgetDefaults>> {
+  const publisherScholar: RetrievalBudgetDefaults = {
+    maxCreditsPerOperation: explicitOperationBudget ?? (residentialAllowed ? DEFAULT_RESIDENTIAL_RETRIEVAL_BUDGET : DEFAULT_RETRIEVAL_BUDGET),
+    maxCreditsPerRequest: explicitRequestLimit ?? (residentialAllowed ? DEFAULT_RESIDENTIAL_RETRIEVAL_REQUEST_LIMIT : DEFAULT_RETRIEVAL_REQUEST_LIMIT)
+  };
+  const conservative: RetrievalBudgetDefaults = {
+    maxCreditsPerOperation: explicitOperationBudget ?? DEFAULT_RETRIEVAL_BUDGET,
+    maxCreditsPerRequest: explicitRequestLimit ?? DEFAULT_RETRIEVAL_REQUEST_LIMIT
+  };
+  return {
+    publisher_discovery: publisherScholar,
+    scholar_search: publisherScholar,
+    scihub_lookup: conservative,
+    other: conservative,
+    unknown: conservative
   };
 }
 
@@ -103,17 +163,16 @@ function isStrictTrue(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === 'true';
 }
 
-function parsePositiveSafeInteger(
+function parseOptionalPositiveSafeInteger(
   value: string | undefined,
-  fallback: number,
   field: string,
   invalidFields: string[]
-): number {
-  if (value === undefined || value.trim() === '') return fallback;
+): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
   const parsed = Number(value.trim());
   if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
   invalidFields.push(field);
-  return fallback;
+  return undefined;
 }
 
 function parseBoundedPositiveInteger(

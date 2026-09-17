@@ -4,11 +4,27 @@
 
 A Node.js Model Context Protocol (MCP) server for searching and downloading academic papers from multiple sources, including arXiv, Web of Science, PubMed, Google Scholar, Sci-Hub, ScienceDirect, Springer, Wiley, Scopus, Crossref, and **14 academic platforms** in total.
 
-![Node.js](https://img.shields.io/badge/node.js->=18.0.0-green.svg)
+![Node.js](https://img.shields.io/badge/node.js-20.18.1%2B%20%2F%2022%2B-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)
+
+## 💖 Sponsors
+
+<p>
+  <a href="https://scrapingant.com/">
+    <img src="assets/scrapingant.png" alt="ScrapingAnt" width="60" height="60">
+  </a>
+</p>
+
+<a href="https://scrapingant.com/">
+  <img src="assets/scrapingant-banner.png" alt="ScrapingAnt web scraping service" width="640">
+</a>
+
+This project is sponsored by [ScrapingAnt](https://scrapingant.com/), a web scraping service for accessing public web data.
+
+**Offer for project users:** Use code `ENTHUSIAST_50` for **50% off the first month of the Enthusiast plan**. The discount applies to the first month only.
 
 ## ✨ Key Features
 
@@ -57,7 +73,7 @@ This project includes integrations that may have **legal, contractual (ToS), and
 
 ### System Requirements
 
-- Node.js >= 18.0.0
+- Node.js 20.18.1+ (Node.js 21 is excluded by dependency engine constraints)
 - npm or yarn
 
 ### Installation
@@ -100,18 +116,22 @@ cp .env.example .env
    # Full Record records/day; 0 means unlimited local accounting.
    WOS_EXPANDED_FULL_RECORD_BUDGET=0
    WOS_EXPANDED_BASE_URL=https://api.clarivate.com/api/wos
-
-   # Optional public-page HTML fetching; never a WoS proxy.
-   # A key alone does not authorize paid retrieval; browser escalation is opt-in.
-   # Residential access is rejected; defaults are 50 credits/operation and 10/request.
+   
+   # Optional public-page HTML fallback; never a WoS/API proxy.
+   # A key alone does not authorize paid retrieval; browser and residential
+   # escalation are separate opt-ins. Invalid/missing paid configuration keeps Direct available.
+   # Without residential authorization Publisher/Scholar default to 50 credits/operation and 10/request.
+   # With SCRAPINGANT_ALLOW_RESIDENTIAL=true their defaults become 500/125;
+   # explicit limits always win and a residential request still requires the residential ceiling.
    SCRAPINGANT_API_KEY=
    SCRAPINGANT_ENABLED=false
    SCRAPINGANT_ALLOW_BROWSER_ESCALATION=false
+   SCRAPINGANT_ALLOW_RESIDENTIAL=false
    SCRAPINGANT_MAX_CREDITS_PER_OPERATION=50
    SCRAPINGANT_MAX_CREDITS_PER_REQUEST=10
    SCRAPINGANT_MAX_CONCURRENCY=1
    SCRAPINGANT_PROXY_TYPE=datacenter
-
+   
    # Controlled Sci-Hub adapter; disabled unless explicitly enabled.
    SCIHUB_ENABLED=false
    SCIHUB_FETCH_MODE=fallback
@@ -169,8 +189,22 @@ Add the following configuration to your Claude Desktop config file:
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-#### Complete NPX Configuration (Recommended)
-The following is a complete MCP configuration. Every value in `env` must be a string; leave optional keys empty when that platform is not enabled. Replace every placeholder with a value from your own environment, and never commit real credentials.
+#### Minimal NPX Configuration (Start Here)
+Use this minimal configuration to start immediately with public sources such as Crossref and arXiv. No API key or optional environment variable is required; add platform-specific keys only when you need them.
+
+```json
+{
+  "mcpServers": {
+    "paper-search-nodejs": {
+      "command": "npx",
+      "args": ["-y", "paper-search-mcp-nodejs"]
+    }
+  }
+}
+```
+
+#### Complete NPX Configuration (Advanced/Optional)
+Use the complete configuration below only when you need keyed platforms, optional fallbacks, or custom limits. Every value in `env` must be a string; replace placeholders with values from your own environment, and never commit real credentials.
 
 ```json
 {
@@ -200,11 +234,12 @@ The following is a complete MCP configuration. Every value in `env` must be a st
         "SCRAPINGANT_API_KEY": "",
         "SCRAPINGANT_ENABLED": "false",
         "SCRAPINGANT_ALLOW_BROWSER_ESCALATION": "false",
+        "SCRAPINGANT_ALLOW_RESIDENTIAL": "false",
         "SCRAPINGANT_MAX_CREDITS_PER_OPERATION": "50",
         "SCRAPINGANT_MAX_CREDITS_PER_REQUEST": "10",
         "SCRAPINGANT_MAX_CONCURRENCY": "1",
         "SCRAPINGANT_PROXY_TYPE": "datacenter",
-        "SCHOLAR_PROXY": "http://user:password@proxy.example:8080",
+        "SCHOLAR_PROXY": "",
         "SCIHUB_ENABLED": "false",
         "SCIHUB_FETCH_MODE": "fallback",
         "SCIHUB_MIRRORS": "",
@@ -219,7 +254,7 @@ The following is a complete MCP configuration. Every value in `env` must be a st
 }
 ```
 
-Replace the `SCHOLAR_PROXY` placeholder with an authorized proxy, or remove that entry when the process already inherits `HTTPS_PROXY`/`HTTP_PROXY`. `WOS_EXPANDED_API_KEY`, `SCRAPINGANT_API_KEY`, and the other optional keys may remain empty.
+`SCHOLAR_PROXY` is an optional explicit override for Scholar direct transport. When it is empty, Scholar uses the standard local proxy aliases (`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`, including lowercase forms) when configured; when set, it takes precedence and is parsed as a full HTTP(S)/SOCKS proxy URL. It does not select the ScrapingAnt paid fallback. The retrieval benchmark does not enable or replace it. `WOS_EXPANDED_API_KEY`, `SCRAPINGANT_API_KEY`, and the other optional keys may remain empty.
 
 #### Local Installation Configuration
 For a local build, keep the complete `env` object above and change only the server command:
@@ -433,6 +468,8 @@ search_scopus({
 })
 ```
 
+Scopus search requests `COMPLETE` by default. If Elsevier explicitly denies the `COMPLETE` view because the key lacks that entitlement, the search enters one bounded `STANDARD` fallback strategy; any transient retries remain subject to the existing retry policy. The fallback omits the `field` override so the API can return its standard field set. Other authentication, query, rate-limit, network, and server errors are not converted into a view fallback. `STANDARD` may contain less enriched metadata (for example, full author, abstract, keyword, affiliation, and funding fields); a valid Scopus API key is still required. See [Scopus Search API views](https://dev.elsevier.com/sc_search_views.html) for the fields available in each view.
+
 ### `check_scihub_mirrors`
 Check health status of Sci-Hub mirror sites
 
@@ -474,11 +511,41 @@ discover_paper_access({
 ```
 
 ### `get_platform_status`
-Check platform status and API keys
+Check local platform capability and API-key status. This is a local diagnostic and does not validate ScrapingAnt account quota or make a paid request.
 
 ```typescript
 get_platform_status({})
 ```
+
+### Public access and cost boundaries
+
+`discover_paper_access` accepts only a DOI. It returns a bounded access state such as `oa_candidate`, `pdf_verified`, `not_found`, `restricted`, `failed`, or `skipped`; a candidate is not an open-license or complete-download claim. `verifyPdf` is opt-in and performs only a bounded PDF prefix check. Candidate order, source provenance, HTTP/API status, fallback attempts, and known local cost are separate evidence fields.
+
+Paid retrieval is Direct-first and finite. Empty/parse-failed public pages may consume an explicitly authorized fallback attempt; a known permission, unsafe target, resource limit, cancellation, deadline, unknown price, or closed ledger stops paid work. Missing/invalid post-dispatch billing is recorded as unknown and consumes its local estimate, but does not independently stop a bounded retry/fallback chain; the final reported credits remain unknown until reconciled. When browser escalation is explicitly enabled, Scholar production tries ScrapingAnt `browser:datacenter` before the remaining paid combinations; browser is one bounded dispatch and has no retry. Returned diagnostics never include cookies, authorization, queries, raw HTML, or sensitive URLs. Public cookies are not read from configuration; Scholar session cookies, when obtained, stay on the exact Scholar HTTPS origin and are never sent to ScrapingAnt.
+
+Use `SCRAPINGANT_ENABLED=true` only after obtaining deployment authorization. Scholar's browser-first fallback requires `SCRAPINGANT_ALLOW_BROWSER_ESCALATION=true`; `SCRAPINGANT_ALLOW_BROWSER_ESCALATION` and `SCRAPINGANT_ALLOW_RESIDENTIAL` are independent controls. Restarting with either flag disabled rolls back the corresponding combinations; it does not erase already observed local costs. A run can also be disabled by leaving the key/paid flag off. No setting synchronizes provider quota or clears an in-flight ledger.
+
+### Offline benchmark
+
+The fixed benchmark corpus and strategy schedule are validated without network access. A complete 360-cell live run is a separately authorized external qualification, not the completion gate for each engineering fix:
+
+```bash
+# Accounting/report simulation (no production retrieval workflow)
+npm run --silent benchmark:offline -- --json
+# Reviewed offline production workflow beneath fixed raw fixtures (virtual clock)
+npm run --silent benchmark:offline -- --workflow --json
+# Optional: write encoded run-id .json and .md artifacts without overwriting existing files.
+npm run --silent benchmark:offline -- --workflow --output-dir ./benchmark-artifacts
+```
+
+The default command validates the frozen 20 DOI/10 Scholar query corpus with an injected response-only accounting simulator. Add `--workflow` to run the reviewed `createProductionBenchmarkCellExecutor` instead: it invokes the real Publisher/Scholar business entries, providers, parsing, session, fallback, scheduler, billing bridge and PDF-prefix paths beneath independent fixed raw fixtures, using a virtual clock while preserving the production pacing rules. Both modes are explicitly offline-only; neither initializes a live provider or uses credentials for retrieval, and neither can produce `live_passed`. The workflow report must be identified separately from simulator totals. Live evaluation is exposed only through the separately named command below; it requires explicit `--authorize-live`, an exclusive explicit `--run-id`, a complete preflight, and the fixed safety ceiling of 15,000 credits, 1,500 HTTP dispatches, and 7,200,000ms. A failed preflight writes a privacy-safe `blocked` report with zero dispatches; it never shrinks the frozen matrix or bypasses configuration. The live executor uses real production transports and is not the offline fixture executor. The planned schedule is 60 production cells plus 300 independent comparison cells; unexecuted live cells remain `not_run` and keep their denominator. Artifact paths are exclusive so a report cannot silently overwrite an earlier run.
+
+```bash
+# Explicitly authorized live campaign; preflight blocks without complete paid/browser/residential configuration.
+npm run --silent benchmark:live -- --authorize-live --authorize-scholar-proxy --run-id live-YYYYMMDD-01 --output-dir ./live-benchmark-artifacts --json
+```
+
+Do not pass `--authorize-live` unless the campaign, provider billing, target scope, and live-capable harness have been reviewed. Pass `--authorize-scholar-proxy` only when the explicit `SCHOLAR_PROXY` endpoint has separately passed TLS/ownership review; ambient proxy aliases alone remain blocked. The command never resumes an old run, appends budget, or changes `offlineOnly` fixtures.
 
 ## 📊 Data Model
 
@@ -685,23 +752,6 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.3.0 Improvements:**
-
-- ✅ **Google Scholar**: Isolated same-origin session, 429/captcha detection, bounded transport fallback, adaptive delay, and proxy support (`SCHOLAR_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`)
-- ✅ **arXiv**: Fixed search query prefix (`all:`) to comply with arXiv API spec
-- ✅ **Google Scholar**: Updated User-Agents to latest browser versions (Chrome 131, Firefox 133, Edge 131)
-- ✅ **Performance**: Implemented `RequestCache` for caching search results and API responses
-- ✅ **Reliability**: Added `RateLimiter` and `QuotaManager` to prevent API abuse and 429 errors
-- ✅ **New Features**: Added `CitationService` and `PDFExtractor` for future enhancements
-- ✅ **Testing**: Restructured test suite into `tests/platforms`, `tests/utils`, and `tests/integration`
-- ✅ **WoS contracts**: Separate Starter v1/v2 and Expanded SR/FR/reference request and response handling
-- ✅ **Quota safety**: Per-attempt throttling, concurrent reservations, Full Record budget tracking, and quota-header status
-- ✅ **Public access discovery**: DOI redirect validation and bounded ScrapingAnt publisher-page discovery (opt-in)
-- ✅ **Shared services**: Parsing and WoS request mechanics moved out of platform-specific public files
-- ✅ **18 Field Tags**: Full support for all WoS Starter API field tags
-- ✅ **Enhanced Filtering**: ISSN, Volume, Page, Issue, DocType, PMID filters
-- ✅ **Query Validation**: Security checks for query complexity and injection prevention
-
 **Supported Search Options:**
 - `query`: Search terms (supports multi-topic)
 - `year`: Single year "2023" or range "2020-2023"
@@ -755,18 +805,21 @@ export NODE_ENV=development
 
 - **HTML search adapter**: Uses the Scholar web page, not an official public API
 - **Metadata and citations**: Parses titles, authors, abstracts, publication years, and “Cited by” counts
-- **Bounded retrieval**: Requests at most 20 results across at most 10 pages with adaptive delays and bounded retry handling
-- **Provider-neutral transport**: Direct Scholar traffic keeps its isolated HTTPS/SOCKS proxy and same-origin session; ScrapingAnt is a static fallback only for network/server failures
+- **Bounded retrieval**: Requests at most 20 results across at most 10 pages with deduplication, dispatch-time pacing, adaptive delays, and bounded retry handling
+- **Provider-neutral transport**: Direct Scholar traffic keeps its isolated same-origin HTTPS session; source waits do not occupy the global transport slot, while ScrapingAnt is a bounded fallback for eligible transport/server failures and empty/parse-failed pages
+- **Session privacy**: Scholar cookies are created in memory for the exact Scholar origin and are never forwarded to ScrapingAnt or returned in diagnostics
 - **No full-text authorization**: PDF/library links remain publisher or institutional links
 
-> **Google Scholar access**: Google’s official help says automated software should respect `robots.txt` and that bulk access is not provided. Direct requests use `SCHOLAR_PROXY` first, then standard proxy aliases (`HTTPS_PROXY`/`HTTP_PROXY`, including lowercase forms) when configured. With the default transport, the configured ScrapingAnt fetcher is used only as a backup for transport failures or upstream 5xx responses—not to bypass 403/429/CAPTCHA responses. If a separately authorized proxy is already configured, use `SCHOLAR_PROXY`:
+> **Google Scholar access**: Google’s official help says automated software should respect `robots.txt` and that bulk access is not provided. Direct requests use the standard local proxy aliases (`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`, including lowercase forms) when configured. An explicit `SCHOLAR_PROXY` overrides those aliases and is parsed as a complete HTTP(S)/SOCKS proxy URL. With the default transport, the configured ScrapingAnt fetcher is used only as a bounded backup for eligible transport failures, upstream 5xx responses, or no usable/parseable results—not to bypass permission, 403/429, or CAPTCHA responses:
 > ```bash
-> # HTTP/HTTPS proxy
+> # Optional explicit HTTP/HTTPS proxy override
 > SCHOLAR_PROXY=http://user:pass@host:port
-> # SOCKS proxy
+> # Optional explicit TLS-to-proxy endpoint
+> SCHOLAR_PROXY=https://user:pass@host:port
+> # Optional SOCKS proxy
 > SCHOLAR_PROXY=socks://host:port
 > ```
-> Required packages are loaded lazily (`http-proxy-agent`, `https-proxy-agent`, `socks-proxy-agent`) — install the one matching your proxy type.
+> Required packages are loaded lazily (`http-proxy-agent`, `https-proxy-agent`, `socks-proxy-agent`) — install the one matching your proxy type. ScrapingAnt Proxy mode is not used as a transparent substitute: `SCRAPINGANT_PROXY_TYPE` is only the provider proxy ceiling, and the legacy `SCHOLAR_PROXY` path remains independent and outside benchmark acceptance.
 
 ### Semantic Scholar Features
 
@@ -777,7 +830,7 @@ export NODE_ENV=development
 
 ### ScrapingAnt Public Fetch Layer
 
-ScrapingAnt is an optional, paid public-page fallback: a key alone does not enable dispatch. Set `SCRAPINGANT_ENABLED=true` to opt in; browser escalation remains disabled unless `SCRAPINGANT_ALLOW_BROWSER_ESCALATION=true` is explicitly authorized. The local defaults are 50 credits per operation and 10 credits per request, and only `datacenter` proxy type is accepted; residential access is rejected. Google Scholar uses `/v2/general`, while WoS DOI access discovery and Sci-Hub fallback use `/v2/extended`. The layer is never a Clarivate/WoS API proxy. DOI discovery rejects known login/SSO/Clarivate targets before dispatch where the local redirect chain is visible. Local DNS checks cannot prove the remote proxy's own redirect destination, so a discovered link is not an OA, authorization, or copyright determination. Actual usage is taken from response credit headers; local budgets are not provider billing balances.
+ScrapingAnt is an optional, paid public-page fallback: a key alone does not enable dispatch. Set `SCRAPINGANT_ENABLED=true` to opt in; browser and residential escalation are independent authorizations. The current Scholar `browser:datacenter`-first order is provisional and requires real provider capability validation; otherwise it retains static-first behavior. Without residential authorization, Publisher/Scholar defaults are 50 credits per operation and 10 credits per request; with `SCRAPINGANT_ALLOW_RESIDENTIAL=true`, their defaults become 500/125. Explicit valid limits always win, but residential dispatch still requires `SCRAPINGANT_PROXY_TYPE=residential`; a datacenter ceiling never sends residential traffic. Google Scholar uses the generic `/v2/general` HTML endpoint (not a dedicated Scholar API), while WoS DOI access discovery and Sci-Hub fallback use `/v2/extended`. The layer is never a Clarivate/WoS API proxy. DOI discovery rejects known login/SSO/Clarivate targets before dispatch where the local redirect chain is visible. Local DNS checks cannot prove the remote proxy's own redirect destination, so a discovered link is not an OA, authorization, or copyright determination. Actual usage is taken from response credit headers; local budgets are not provider billing balances. A known permission/security/resource/cancellation/deadline failure does not trigger paid fallback, and completed strategy scopes retain only finite cache metadata rather than raw provider documents. Persistent Scholar blocking remains an external provider limitation.
 
 ### Sci-Hub Features
 
@@ -794,7 +847,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🤝 Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome! 
 
 1. Fork the project
 2. Create feature branch (`git checkout -b feature/amazing-feature`)

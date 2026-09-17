@@ -100,6 +100,15 @@ describe('ScrapingAntFetcher', () => {
     expect(failed.getStatus().requestCount).toBe(1);
   });
 
+  it('rejects residential requests in the legacy compatibility adapter before transport', async () => {
+    const request = jest.fn(async (_config: any) => ({ status: 200, headers: {}, data: {} }));
+    const fetcher = new ScrapingAntFetcher({ apiKey: 'test-api-key', client: { request }, validateUrl });
+
+    await expect(fetcher.fetch('https://example.com/residential', { proxyType: 'residential' }))
+      .rejects.toThrow(/Residential proxy retrieval is not supported/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('allows the retrieval adapter to request exactly one transport attempt', async () => {
     const request = jest.fn(async (_config: any) => ({ status: 503, headers: {}, data: {} }));
     const fetcher = new ScrapingAntFetcher({
