@@ -1,10 +1,22 @@
 import type { AxiosRequestConfig } from 'axios';
 import { API_ENDPOINTS, TIMEOUTS } from '../config/constants.js';
 import { disposeResponseBody, getHeaderValue } from '../utils/PublicNetwork.js';
-import { RetrievalError, type FiniteDocument, type RetrievalCostObservation, type RetrievalOperationContext, type RetrievalProvider, type RetrievalRequest, type RetrievalResponse } from './types.js';
+import {
+  isRetrievalProxyType,
+  RetrievalError,
+  type FiniteDocument,
+  type RetrievalCostObservation,
+  type RetrievalOperationContext,
+  type RetrievalProvider,
+  type RetrievalRequest,
+  type RetrievalResponse
+} from './types.js';
 import { hasSensitiveCandidateCredentials } from './OutboundSecurityPolicy.js';
 import { MAX_RETRIEVAL_RESPONSE_BYTES } from './DirectHttpProvider.js';
 import { parseRetrievalCredits } from './RetrievalCostPolicy.js';
+import { globalPublicSourceDispatchScheduler, SourceCooldownError, SourceDispatchDeadlineError, type SourceDispatchLease, type PublicSourceDispatchScheduler } from '../services/PublicSourceDispatchScheduler.js';
+import { createRetrievalDispatchId } from './dispatchId.js';
+import { relayAbortReason, retrievalFailureKindForAbort } from './abortDiagnostics.js';
 
 export interface ScrapingAntProviderResponse {
   readonly status: number;
@@ -20,6 +32,7 @@ export interface ScrapingAntProviderOptions {
   apiKey?: string;
   client?: ScrapingAntProviderClient;
   maxResponseBytes?: number;
+  sourceScheduler?: PublicSourceDispatchScheduler;
 }
 
 const MAX_IFRAME_DOCUMENTS = 16;
@@ -32,17 +45,23 @@ export class ScrapingAntProvider implements RetrievalProvider {
     iframeDocuments: true,
     pdfCandidates: true,
     browser: true,
-    paid: true
+    paid: true,
+    proxyTypes: ['datacenter', 'residential'],
+    combinations: ['static:datacenter', 'browser:datacenter', 'static:residential', 'browser:residential'],
+    dispatchObservation: true,
+    transportSlotManagement: true
   } as const;
 
   private readonly apiKey?: string;
   private readonly client: ScrapingAntProviderClient;
   private readonly maxResponseBytes: number;
+  private readonly sourceScheduler: PublicSourceDispatchScheduler;
 
   constructor(options: ScrapingAntProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || process.env.SCRAPINGANT_API_KEY?.trim() || undefined;
     this.client = options.client || defaultClient();
     this.maxResponseBytes = options.maxResponseBytes ?? MAX_RETRIEVAL_RESPONSE_BYTES;
+    this.sourceScheduler = options.sourceScheduler || globalPublicSourceDispatchScheduler;
   }
 
   isConfigured(): boolean {
@@ -57,6 +76,13 @@ export class ScrapingAntProvider implements RetrievalProvider {
         provider: this.name
       });
     }
+    if (!isRetrievalProxyType(request.proxyType ?? 'datacenter')) {
+      throw new RetrievalError({
+        code: 'invalid_request',
+        message: 'ScrapingAnt provider received an unsupported proxy category',
+        provider: this.name
+      });
+    }
     if (!this.apiKey) {
       throw new RetrievalError({
         code: 'configuration',
@@ -65,12 +91,30 @@ export class ScrapingAntProvider implements RetrievalProvider {
       });
     }
     if (context.signal.aborted) {
-      throw new RetrievalError({ code: 'cancelled', message: 'Retrieval operation was cancelled', provider: this.name });
+      throw new RetrievalError({
+        code: 'cancelled',
+        message: 'Retrieval operation was cancelled',
+        provider: this.name,
+        failureKind: retrievalFailureKindForAbort(context.signal, context)
+      });
     }
 
     const remainingMs = context.remainingMs();
     if (remainingMs <= 0) {
-      throw new RetrievalError({ code: 'timeout', message: 'Retrieval operation timed out', provider: this.name });
+      throw new RetrievalError({
+        code: 'timeout',
+        message: 'Retrieval operation timed out',
+        provider: this.name,
+        failureKind: 'operation_deadline'
+      });
+    }
+    // Publisher and Scholar paid attempts own the full bounded API timeout,
+    // including their finite response body. Do not submit when those
+    // operations cannot cover that timeout: cancellation after dispatch would
+    // make billing unknown. Other consumers (for example Sci-Hub lookup) keep
+    // their own shorter operation bounds and must not inherit this guard.
+    if (requiresFullProviderTimeout(request.purpose) && remainingMs < TIMEOUTS.EXTENDED) {
+      throw providerDeadlineError();
     }
 
     const endpoint = request.documentFormat === 'html_with_iframes'
@@ -83,8 +127,14 @@ export class ScrapingAntProvider implements RetrievalProvider {
         url: request.url,
         'x-api-key': this.apiKey,
         browser: request.strategy === 'browser',
-        proxy_type: 'datacenter'
+        proxy_type: request.proxyType ?? 'datacenter'
       },
+      // The provider's proxy_type parameter controls the target-side proxy;
+      // the API control-plane request itself must not inherit a process proxy.
+      proxy: false,
+      // A provider API call is one local submission; retries belong to the
+      // shared RetrievalService and API redirects are never implicit.
+      maxRedirects: 0,
       // Stream the decompressed response so the bounded reader can destroy it
       // at MAX_RETRIEVAL_RESPONSE_BYTES instead of letting Axios buffer it all.
       responseType: 'stream',
@@ -94,21 +144,81 @@ export class ScrapingAntProvider implements RetrievalProvider {
     };
 
     let response: ScrapingAntProviderResponse | undefined;
+    let responseBodyStarted = false;
     let cost: RetrievalCostObservation = { known: false, credits: null, reason: 'missing_billing_header' };
     const linkedSignal = linkAbortSignals(context.signal, request.signal);
     requestConfig.signal = linkedSignal.signal;
+    let releaseSource: SourceDispatchLease | undefined;
     try {
       throwIfCancelled(context, linkedSignal.signal);
-      response = await this.client.request(requestConfig);
+      // The target origin, rather than the provider API origin, is the source
+      // identity. This keeps Scholar direct and paid submissions on one paced
+      // queue and prevents provider switching from bypassing cooldowns.
+      releaseSource = await this.sourceScheduler.acquire(
+        safeOrigin(request.url),
+        linkedSignal.signal,
+        context.deadlineAt,
+        request.purpose === 'scholar_search' ? 3_000 : 0,
+        { deferStart: true }
+      );
+      let dispatchObservation!: {
+        readonly dispatchId: string;
+        readonly role: 'provider_api';
+        readonly origin: string;
+        readonly submittedAt: number;
+        readonly bodyPending: boolean;
+      };
+      const dispatch = async (): Promise<ScrapingAntProviderResponse> => {
+        throwIfCancelled(context, linkedSignal.signal);
+        // Source/concurrency queueing can consume the remaining tail after
+        // the initial check; recheck at the exact submission boundary for
+        // Publisher and Scholar only.
+        if (requiresFullProviderTimeout(request.purpose) && context.remainingMs() < TIMEOUTS.EXTENDED) {
+          throw providerDeadlineError();
+        }
+        releaseSource?.markStarted(context.deadlineAt);
+        dispatchObservation = {
+          dispatchId: createRetrievalDispatchId(),
+          role: 'provider_api',
+          origin: new URL(endpoint).origin,
+          submittedAt: Date.now(),
+          bodyPending: true
+        };
+        request.dispatchObserver?.onDispatch?.(dispatchObservation);
+        const result = await this.client.request(requestConfig);
+        try {
+          request.dispatchObserver?.onResponse?.({
+            ...dispatchObservation,
+            ...(toStatus(result.status) === undefined ? {} : { status: toStatus(result.status) })
+          });
+        } catch {
+          // Response diagnostics are observational; a completed provider
+          // response must not become a retryable transport failure.
+        }
+        return result;
+      };
+      response = context.withDispatchSlot
+        ? await context.withDispatchSlot(dispatch, linkedSignal.signal)
+        : await dispatch();
       cost = parseRetrievalCredits(getHeaderValue(response.headers, 'Ant-credits-cost'));
       const apiStatus = toStatus(response.status);
-      const payload = await readBoundedPayload(response.data, this.maxResponseBytes, context, linkedSignal.signal);
+      const readBody = () => {
+        responseBodyStarted = true;
+        return readBoundedPayload(response!.data, this.maxResponseBytes, context, linkedSignal.signal);
+      };
+      const payload = context.withDispatchSlot
+        ? await context.withDispatchSlot(readBody, linkedSignal.signal)
+        : await readBody();
       if (apiStatus === undefined || apiStatus < 200 || apiStatus >= 300) {
         throw createApiError(apiStatus, cost);
       }
 
       const parsed = parsePayload(payload);
       const pageStatus = extractPageStatus(parsed, response.headers);
+      // The provider API's Retry-After must not be treated as the target's
+      // header. A target 429 still establishes the conservative shared source
+      // cooldown before this lease is released.
+      if (pageStatus === 429) this.sourceScheduler.observeRetryAfter(safeOrigin(request.url), 429, {});
       const document = createDocument(parsed, request.url, pageStatus);
       return {
         provider: this.name,
@@ -120,6 +230,24 @@ export class ScrapingAntProvider implements RetrievalProvider {
         cost
       };
     } catch (error) {
+      if (error instanceof SourceDispatchDeadlineError) {
+        throw new RetrievalError({
+          code: 'timeout',
+          message: 'ScrapingAnt retrieval timed out',
+          provider: this.name,
+          failureKind: 'operation_deadline',
+          cost
+        });
+      }
+      if (error instanceof SourceCooldownError) {
+        throw new RetrievalError({
+          code: 'target_unavailable',
+          message: 'Public source is cooling down',
+          provider: this.name,
+          targetStatus: 429,
+          cost
+        });
+      }
       if (error instanceof RetrievalError) {
         throw withCost(error, cost);
       }
@@ -129,6 +257,7 @@ export class ScrapingAntProvider implements RetrievalProvider {
           message: 'Retrieval operation was cancelled',
           provider: this.name,
           apiStatus: toStatus(response?.status),
+          failureKind: retrievalFailureKindForAbort(linkedSignal.signal, context),
           cost
         });
       }
@@ -138,6 +267,9 @@ export class ScrapingAntProvider implements RetrievalProvider {
           message: 'ScrapingAnt retrieval timed out',
           provider: this.name,
           apiStatus: toStatus(response?.status),
+          failureKind: context.remainingMs() <= 0
+            ? 'operation_deadline'
+            : responseBodyStarted ? 'response_body' : 'transport_timeout',
           cost
         });
       }
@@ -147,10 +279,12 @@ export class ScrapingAntProvider implements RetrievalProvider {
         provider: this.name,
         apiStatus: toStatus(response?.status),
         retryable: true,
+        ...(responseBodyStarted ? { failureKind: 'response_body' as const } : {}),
         cost
       });
     } finally {
       if (response) disposeResponseBody(response.data);
+      releaseSource?.();
       linkedSignal.dispose();
     }
   }
@@ -189,7 +323,12 @@ async function readBoundedPayload(
     const iterator = body[Symbol.asyncIterator]();
     try {
       while (true) {
-        const next = await waitForAbort(Promise.resolve(iterator.next()), signal, () => disposeAsyncIterator(body, iterator));
+        const next = await waitForAbort(
+          Promise.resolve(iterator.next()),
+          signal,
+          () => disposeAsyncIterator(body, iterator),
+          () => retrievalFailureKindForAbort(signal, context)
+        );
         if (next.done) break;
         throwIfCancelled(context, signal);
         const chunk = next.value;
@@ -216,7 +355,8 @@ async function readBoundedPayload(
     throw new RetrievalError({
       code: 'response_too_large',
       message: 'Retrieval response cannot be safely bounded',
-      provider: 'scrapingant'
+      provider: 'scrapingant',
+      failureKind: 'response_body'
     });
   }
   ensurePayloadSize(Buffer.byteLength(serialized), maxBytes);
@@ -254,7 +394,8 @@ function createDocument(payload: unknown, submittedUrl: string, targetStatus?: n
     throw new RetrievalError({
       code: 'document_limit',
       message: 'Retrieval response contains too many iframe documents',
-      provider: 'scrapingant'
+      provider: 'scrapingant',
+      failureKind: 'response_body'
     });
   }
 
@@ -321,10 +462,11 @@ function createApiError(status: number | undefined, cost: RetrievalCostObservati
   const normalizedStatus = status === undefined ? undefined : status;
   let code: RetrievalError['code'] = 'provider_error';
   let retryable = false;
-  if (normalizedStatus === 400 || normalizedStatus === 422) code = 'invalid_request';
+  if (normalizedStatus === 400 || normalizedStatus === 405 || normalizedStatus === 422) code = 'invalid_request';
   else if (normalizedStatus === 403) code = 'auth_or_credits_unknown';
   else if (normalizedStatus === 404) code = 'target_unavailable';
   else if (normalizedStatus === 409) { code = 'concurrency_limited'; retryable = true; }
+  else if (normalizedStatus === 429) code = 'provider_error';
   else if (normalizedStatus === 423) { code = 'detected'; retryable = true; }
   else if (normalizedStatus !== undefined && normalizedStatus >= 500) { code = 'server_error'; retryable = true; }
 
@@ -349,6 +491,7 @@ function withCost(error: RetrievalError, cost: RetrievalCostObservation): Retrie
     apiStatus: error.apiStatus,
     targetStatus: error.targetStatus,
     retryable: error.retryable,
+    failureKind: error.failureKind,
     cost
   });
 }
@@ -359,8 +502,17 @@ function ensurePayloadSize(size: number, maxBytes: number, body?: unknown): void
   throw new RetrievalError({
     code: 'response_too_large',
     message: 'Retrieval response exceeds the allowed size',
-    provider: 'scrapingant'
+    provider: 'scrapingant',
+    failureKind: 'response_body'
   });
+}
+
+function safeOrigin(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return 'unknown';
+  }
 }
 
 function toStatus(value: unknown): number | undefined {
@@ -384,11 +536,17 @@ function disposeAsyncIterator(body: unknown, iterator: AsyncIterator<unknown>): 
   }
 }
 
-function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal, onLateValue?: (value: T) => void): Promise<T> {
+function waitForAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  onLateValue?: (value: T) => void,
+  failureKind?: () => RetrievalError['failureKind']
+): Promise<T> {
   if (signal.aborted) return Promise.reject(new RetrievalError({
     code: 'cancelled',
     message: 'Retrieval operation was cancelled',
-    provider: 'scrapingant'
+    provider: 'scrapingant',
+    failureKind: failureKind?.() || 'cancelled'
   }));
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -401,7 +559,8 @@ function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal, onLateValue?:
       reject(new RetrievalError({
         code: 'cancelled',
         message: 'Retrieval operation was cancelled',
-        provider: 'scrapingant'
+        provider: 'scrapingant',
+        failureKind: failureKind?.() || 'cancelled'
       }));
     };
     signal.addEventListener('abort', onAbort, { once: true });
@@ -422,17 +581,35 @@ function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal, onLateValue?:
   });
 }
 
+function requiresFullProviderTimeout(purpose: RetrievalRequest['purpose']): boolean {
+  return purpose === 'publisher_discovery' || purpose === 'scholar_search';
+}
+
+function providerDeadlineError(): RetrievalError {
+  return new RetrievalError({
+    code: 'timeout',
+    message: 'Retrieval operation cannot cover the bounded provider timeout',
+    provider: 'scrapingant',
+    failureKind: 'operation_deadline'
+  });
+}
+
 function throwIfCancelled(context: RetrievalOperationContext, signal: AbortSignal = context.signal): void {
   if (context.signal.aborted || signal.aborted) {
-    throw new RetrievalError({ code: 'cancelled', message: 'Retrieval operation was cancelled', provider: 'scrapingant' });
+    throw new RetrievalError({
+      code: 'cancelled',
+      message: 'Retrieval operation was cancelled',
+      provider: 'scrapingant',
+      failureKind: retrievalFailureKindForAbort(signal, context)
+    });
   }
 }
 
 function linkAbortSignals(primary: AbortSignal, secondary?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
   if (!secondary) return { signal: primary, dispose: () => undefined };
   const controller = new AbortController();
-  const relay = () => controller.abort();
-  if (primary.aborted || secondary.aborted) controller.abort();
+  const relay = () => relayAbortReason(controller, primary.aborted ? primary : secondary!);
+  if (primary.aborted || secondary.aborted) relay();
   else {
     primary.addEventListener('abort', relay, { once: true });
     secondary.addEventListener('abort', relay, { once: true });

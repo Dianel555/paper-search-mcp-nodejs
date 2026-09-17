@@ -1,18 +1,23 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { Readable } from 'node:stream';
+import { TIMEOUTS } from '../../src/config/constants.js';
 import { PaperFactory } from '../../src/models/Paper.js';
 import { PublicAccessDiscovery } from '../../src/services/PublicAccessDiscovery.js';
+import { PublicHttpClient } from '../../src/services/PublicHttpClient.js';
+import { globalPublicSourceDispatchScheduler, PublicSourceDispatchScheduler } from '../../src/services/PublicSourceDispatchScheduler.js';
 
 import { parseRetrievalConfiguration, type RetrievalConfiguration } from '../../src/retrieval/Configuration.js';
 import { RetrievalCostPolicy } from '../../src/retrieval/RetrievalCostPolicy.js';
 import { ScrapingAntProvider } from '../../src/retrieval/ScrapingAntProvider.js';
-import { RetrievalService } from '../../src/retrieval/RetrievalService.js';
+import { RETRIEVAL_OPERATION_TIMEOUT_MS, RetrievalService } from '../../src/retrieval/RetrievalService.js';
 import { OutboundSecurityPolicy } from '../../src/retrieval/OutboundSecurityPolicy.js';
 import { RetrievalError } from '../../src/retrieval/types.js';
 import type {
   RetrievalOperationContext,
   RetrievalProvider,
   RetrievalRequest,
-  RetrievalResponse
+  RetrievalResponse,
+  RetrievalDispatchSlot
 } from '../../src/retrieval/types.js';
 
 const validateUrl = async (url: string) => {
@@ -107,6 +112,7 @@ function makeService(
 
 interface TestDoiRequestConfig {
   url?: string;
+  method?: string;
   headers?: unknown;
 }
 
@@ -170,6 +176,9 @@ function paper(doi = '10.1000/example', extra: Partial<Parameters<typeof PaperFa
 }
 
 describe('PublicAccessDiscovery', () => {
+  afterEach(() => {
+    globalPublicSourceDispatchScheduler.reset();
+  });
   it('rejects an invalid DOI without making a request', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/paper.pdf">PDF</a>'));
     const { discovery, requester } = makeDiscovery(direct);
@@ -178,6 +187,266 @@ describe('PublicAccessDiscovery', () => {
     expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'skipped', reason: 'invalid_doi' }));
     expect(direct).not.toHaveBeenCalled();
     expect(requester.request).not.toHaveBeenCalled();
+  });
+
+  it('uses the shared 120-second operation ceiling by default', async () => {
+    const service = makeService(async () => response('direct', 'direct', '<html />'));
+    const createOperation = jest.spyOn(service, 'createOperation');
+    const discovery = new PublicAccessDiscovery(service, {
+      retrievalService: service,
+      publicHttpRequester: makeDoiRequester(),
+      validateUrl
+    });
+
+    await discovery.enrich([paper()]);
+    expect(createOperation).toHaveBeenCalledWith(expect.objectContaining({
+      timeoutMs: RETRIEVAL_OPERATION_TIMEOUT_MS,
+      purpose: 'publisher_discovery'
+    }));
+  });
+
+  it('keeps a safely reached Publisher error available for the bounded paid chain', async () => {
+    const requester = makeDoiRequester('https://publisher.example/article');
+    requester.request.mockImplementation(async (config: TestDoiRequestConfig) => {
+      if ((config.url || '').includes('doi.org')) {
+        return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+      }
+      return { status: 403, headers: {}, data: undefined };
+    });
+    const direct = jest.fn(async () => response('direct', 'direct', '<div id="pdf"></div><script src="/app.js"></script>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/fallback.pdf">PDF</a>'));
+    const { discovery, direct: directSpy, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true), requester);
+
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(directSpy).toHaveBeenCalledTimes(1);
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+    expect(enriched.pdfUrl).toBe('https://publisher.example/fallback.pdf');
+  });
+
+  it.each([403, 404, 410, 500])('retains a safely reached Publisher status %s for fallback', async targetStatus => {
+    const requester = makeDoiRequester('https://publisher.example/article');
+    requester.request.mockImplementation(async (config: TestDoiRequestConfig) => {
+      if ((config.url || '').includes('doi.org')) {
+        return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+      }
+      return { status: targetStatus, headers: {}, data: undefined };
+    });
+    const direct = jest.fn(async () => response('direct', 'direct', '<html><p>temporary target result</p></html>'));
+    const paid = jest.fn(async () => response('paid', 'static', `<a href="https://publisher.example/status-${targetStatus}.pdf">PDF</a>`));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true), requester);
+
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.pdfUrl).toBe(`https://publisher.example/status-${targetStatus}.pdf`);
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hand a resolver error to a paid provider', async () => {
+    const requester = {
+      request: jest.fn(async (config: TestDoiRequestConfig) => {
+        if ((config.url || '').includes('doi.org')) return { status: 404, headers: {}, data: undefined };
+        return { status: 200, headers: {}, data: undefined };
+      })
+    };
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/paper.pdf">PDF</a>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const { discovery, direct: directSpy, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true), requester as any);
+
+    await discovery.enrich([paper()]);
+
+    expect(requester.request).toHaveBeenCalledTimes(1);
+    expect(directSpy).not.toHaveBeenCalled();
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not send a paid comparison request after a restricted HEAD fallback page', async () => {
+    const requester = makeDoiRequester('https://publisher.example/article');
+    requester.request.mockImplementation(async (config: TestDoiRequestConfig) => {
+      if (config.method === 'HEAD') return { status: 405, headers: {}, data: undefined };
+      if ((config.url || '').includes('doi.org')) {
+        return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+      }
+      return {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+        data: '<html><body>subscription required</body></html>'
+      };
+    });
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/unexpected.pdf">PDF</a>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true), requester);
+
+    const [enriched] = await discovery.enrich([paper()], {
+      strategy: { strategy: 'static', proxyType: 'datacenter' }
+    });
+
+    expect(paidSpy).not.toHaveBeenCalled();
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'restricted' }));
+  });
+
+  it.each([429, 500])('attributes a selected paid comparison failure after a clean HEAD fallback page (%s)', async targetStatus => {
+    const requester = makeDoiRequester('https://publisher.example/article');
+    requester.request.mockImplementation(async (config: TestDoiRequestConfig) => {
+      if (config.method === 'HEAD') return { status: 405, headers: {}, data: undefined };
+      if ((config.url || '').includes('doi.org')) {
+        return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+      }
+      return {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+        data: '<html><body>clean publisher page</body></html>'
+      };
+    });
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/unexpected.pdf">PDF</a>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<html><body>selected paid failure</body></html>', targetStatus));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true), requester);
+
+    const [enriched] = await discovery.enrich([paper()], {
+      strategy: { strategy: 'static', proxyType: 'datacenter' }
+    });
+
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({
+      targetStatus,
+      ...(targetStatus === 429 ? { status: 'failed', reason: 'target_rate_limited' } : { status: 'failed' })
+    }));
+  });
+
+  it('reuses the bounded GET page used for HEAD method fallback', async () => {
+    const requester = {
+      request: jest.fn(async (config: TestDoiRequestConfig) => {
+        if ((config as any).method === 'HEAD') {
+          return { status: 405, headers: {}, data: undefined };
+        }
+        if ((config.url || '').includes('doi.org')) {
+          return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+        }
+        const body = Readable.from(['<meta name="citation_pdf_url" ', 'content="https://publisher.example/head-fallback.pdf">']);
+        jest.spyOn(body, 'destroy');
+        return {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+          data: body
+        };
+      })
+    };
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/unexpected.pdf">PDF</a>'));
+    const { discovery, direct: directSpy } = makeDiscovery(direct, undefined, configuration(false), requester as any);
+
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.pdfUrl).toBe('https://publisher.example/head-fallback.pdf');
+    expect(directSpy).not.toHaveBeenCalled();
+    expect(requester.request).toHaveBeenCalledTimes(3);
+  });
+
+  it('holds a DOI fallback source lease until its body is consumed', async () => {
+    let resolveBody!: () => void;
+    let bodyStarted!: () => void;
+    const started = new Promise<void>(resolve => { bodyStarted = resolve; });
+    const body = {
+      [Symbol.asyncIterator]() {
+        let done = false;
+        return {
+          next: () => {
+            if (done) return Promise.resolve({ done: true, value: undefined });
+            return new Promise<{ done: boolean; value?: Uint8Array }>(resolve => {
+              resolveBody = () => {
+                done = true;
+                resolve({ done: true, value: undefined });
+              };
+              bodyStarted();
+            });
+          },
+          return: async () => {
+            done = true;
+            return { done: true, value: undefined };
+          }
+        };
+      }
+    };
+    const requester = jest.fn(async (config: any) => {
+      if (config.url.includes('doi.org') && config.method === 'HEAD') return { status: 405, headers: {}, data: undefined };
+      if (config.url.includes('doi.org')) return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+      if (config.url.includes('/article')) return { status: 200, headers: {}, data: body };
+      return { status: 200, headers: {}, data: 'other' };
+    });
+    const scheduler = new PublicSourceDispatchScheduler();
+    const publicClient = new PublicHttpClient({ client: { request: requester }, sourceScheduler: scheduler, validateUrl });
+    const service = {
+      createOperation: jest.fn(),
+      retrieveWithRetry: jest.fn(),
+      getProcessStatus: jest.fn(() => ({ enabled: false, browserAllowed: false }))
+    } as any;
+    const discovery = new PublicAccessDiscovery(service, {
+      retrievalService: service,
+      publicHttpClient: publicClient,
+      validateUrl
+    });
+    const operation = {
+      operationId: 'doi-lease-operation',
+      signal: new AbortController().signal,
+      deadlineAt: Date.now() + 120_000,
+      remainingMs: () => 120_000,
+      cost: {} as any
+    } as RetrievalOperationContext;
+
+    const pending = discovery.enrich([paper()], { operation });
+    await started;
+    const other = publicClient.request('https://publisher.example/other', { method: 'GET' });
+    await Promise.resolve();
+    expect(requester).toHaveBeenCalledTimes(3);
+    resolveBody();
+    await pending;
+    await expect(other).resolves.toBeDefined();
+    expect(requester).toHaveBeenCalledTimes(4);
+  });
+
+  it('passes the operation transport slot to DOI and PDF auxiliary requests', async () => {
+    const controller = new AbortController();
+    const dispatchSlot: RetrievalDispatchSlot = jest.fn(async <T>(task: () => Promise<T>) => task()) as unknown as RetrievalDispatchSlot;
+    const operation: RetrievalOperationContext = {
+      operationId: 'auxiliary-slot-operation',
+      signal: controller.signal,
+      deadlineAt: Date.now() + 120_000,
+      remainingMs: () => 120_000,
+      withDispatchSlot: dispatchSlot,
+      cost: {} as any
+    };
+    const publicClient: any = {
+      request: jest.fn(async (url: string, config: any) => {
+        if (url.includes('doi.org')) {
+          return {
+            response: { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined },
+            finalUrl: 'https://publisher.example/article'
+          };
+        }
+        return {
+          response: { status: 200, headers: { 'content-type': 'application/pdf' }, data: Buffer.from('%PDF-1.7') },
+          finalUrl: url
+        };
+      }),
+      withPurpose: jest.fn(() => publicClient)
+    };
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://cdn.example/auxiliary.pdf">PDF</a>'));
+    const service = {
+      createOperation: jest.fn(),
+      retrieveWithRetry: jest.fn(async () => response('direct', 'direct', '<a href="https://cdn.example/auxiliary.pdf">PDF</a>')),
+      getProcessStatus: jest.fn(() => ({ enabled: false, browserAllowed: false }))
+    } as any;
+    const discovery = new PublicAccessDiscovery(service, {
+      retrievalService: service,
+      publicHttpClient: publicClient,
+      validateUrl
+    });
+
+    const [enriched] = await discovery.enrich([paper()], { operation, verifyPdf: true });
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'pdf_verified' }));
+    expect(publicClient.request).toHaveBeenCalledTimes(2);
+    expect(publicClient.request.mock.calls.every((call: any[]) => call[1].dispatchSlot === dispatchSlot)).toBe(true);
+    expect(dispatchSlot).not.toHaveBeenCalled();
+    expect(direct).not.toHaveBeenCalled();
   });
 
   it('uses controlled direct retrieval first and records a candidate without paid dispatch', async () => {
@@ -195,6 +464,56 @@ describe('PublicAccessDiscovery', () => {
     }));
     expect(directSpy).toHaveBeenCalledTimes(1);
     expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a paper as a challenge because a non-visible script mentions Cloudflare', async () => {
+    const direct = jest.fn(async (_request: RetrievalRequest, _context: RetrievalOperationContext) =>
+      response('direct', 'direct', '<meta name="citation_pdf_url" content="/public/paper.pdf"><script>const provider = "cloudflare";</script>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({
+      status: 'oa_candidate',
+      candidateUrl: 'https://publisher.example/public/paper.pdf'
+    }));
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it('retains a noscript permission message as restriction evidence', async () => {
+    const direct = jest.fn(async (_request: RetrievalRequest, _context: RetrievalOperationContext) =>
+      response('direct', 'direct', '<noscript><p>Please sign in to access the full text</p></noscript><a href="https://publisher.example/paper.pdf">PDF</a>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const [enriched] = await discovery.enrich([paper('10.1000/noscript-restriction')]);
+
+    expect(enriched.pdfUrl).toBe('');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'restricted' }));
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['visible', '<p>Sign in to access the full text</p>'],
+    ['noscript', '<noscript><p>Sign in to access the full text</p></noscript>']
+  ] as Array<[string, string]>)('does not retry a 503 permission page before paid fallback (%s)', async (_label, restrictionMarkup) => {
+    const direct = jest.fn(async () => response(
+      'direct',
+      'direct',
+      `${restrictionMarkup}<a href="https://publisher.example/restricted.pdf">PDF</a>`,
+      503
+    ));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const { discovery, direct: directSpy, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true));
+    const [enriched] = await discovery.enrich([paper(`10.1000/restricted-503-${_label}`)]);
+
+    expect(directSpy).toHaveBeenCalledTimes(1);
+    expect(paidSpy).not.toHaveBeenCalled();
+    expect(enriched.pdfUrl).toBe('');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({
+      status: 'restricted',
+      targetStatus: 503
+    }));
+    expect(enriched.extra?.accessDiscovery).not.toHaveProperty('candidateUrl');
   });
 
   it('does not expose a signed iframe source alongside a safe absolute candidate', async () => {
@@ -296,7 +615,7 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy).not.toHaveBeenCalled();
   });
 
-  it('preserves a candidate after unknown cost, closes paid admission, and keeps the Paper snapshot stable', async () => {
+  it('preserves a candidate after unknown cost and keeps the Paper snapshot stable', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<div id="pdf"></div><script src="/app.js"></script>'));
     const paid = jest.fn(async () => ({
       ...response('paid', 'static', '<a href="https://publisher.example/unknown-cost.pdf">PDF</a>'),
@@ -335,12 +654,17 @@ describe('PublicAccessDiscovery', () => {
       expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
         admissionUsed: 3,
         reportedCredits: 3,
-        paidClosed: true
+        reportedCreditsKnown: true,
+        paidClosed: false
       }));
 
       const [later] = await discovery.enrich([paper('10.1000/later')], { operation });
-      expect(later.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'skipped', reason: 'paid_budget_unavailable' }));
-      expect(paidSpy).toHaveBeenCalledTimes(1);
+      expect(later.extra?.accessDiscovery).toEqual(expect.objectContaining({
+        status: 'oa_candidate',
+        provider: 'paid',
+        strategy: 'static'
+      }));
+      expect(paidSpy).toHaveBeenCalledTimes(2);
     } finally {
       operation.dispose();
     }
@@ -359,14 +683,67 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy).not.toHaveBeenCalled();
   });
 
-  it('does not use paid retrieval for a clean page with no candidate', async () => {
+  it('uses the bounded paid chain for a clean page with no candidate', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<html><p>Abstract only</p></html>'));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
     const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
     const [enriched] = await discovery.enrich([paper()]);
 
-    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'not_found', reason: 'no_candidate' }));
-    expect(paidSpy).not.toHaveBeenCalled();
+    expect(enriched.pdfUrl).toBe('https://publisher.example/paid.pdf');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'oa_candidate', strategy: 'static' }));
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a complete clean not-found observation after ordinary paid failure', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<html><p>Abstract only</p></html>'));
+    const paid = jest.fn(async () => {
+      throw new RetrievalError({
+        code: 'network',
+        message: 'temporary provider failure',
+        provider: 'paid',
+        retryable: true,
+        cost: { known: true, credits: 1 }
+      });
+    });
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true, false));
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({
+      status: 'not_found',
+      reason: 'no_candidate',
+      fallback: expect.objectContaining({ attempted: true })
+    }));
+    expect(paidSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops the paid chain after explicit 2xx absence', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<html><p>Abstract only</p></html>'));
+    const paid = jest.fn(async (request: RetrievalRequest) => request.strategy === 'static'
+      ? response('paid', 'static', '<html><p>Article not found</p></html>')
+      : response('paid', 'browser', '<a href="https://publisher.example/should-not-run.pdf">PDF</a>'));
+    const config = configuration(true, true);
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, config);
+    const [enriched] = await discovery.enrich([paper('10.1000/explicit-absence')]);
+
+    expect(enriched.pdfUrl).toBe('');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'not_found', reason: 'target_not_found' }));
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+    expect(paidSpy.mock.calls[0][0]?.strategy).toBe('static');
+  });
+
+  it('lets later permission or resource termination override clean evidence', async () => {
+    for (const [code, expectedStatus] of [
+      ['security', 'restricted'],
+      ['response_too_large', 'failed']
+    ] as const) {
+      const direct = jest.fn(async () => response('direct', 'direct', '<html><p>Abstract only</p></html>'));
+      const paid = jest.fn(async () => {
+        throw new RetrievalError({ code: code as any, message: 'terminal', provider: 'paid' });
+      });
+      const { discovery } = makeDiscovery(direct, paid, configuration(true, false));
+      const [enriched] = await discovery.enrich([paper(`10.1000/${code}`)]);
+      expect(enriched.extra?.accessDiscovery?.status).toBe(expectedStatus);
+    }
   });
 
   it('switches from dynamic direct HTML to static retrieval only when enabled', async () => {
@@ -380,6 +757,182 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy).toHaveBeenCalledTimes(1);
   });
 
+  it.each([401, 407, 423])('keeps terminal permission status %s ahead of challenge text', async targetStatus => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<p>CAPTCHA verification required</p>', targetStatus));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/should-not-run.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const [enriched] = await discovery.enrich([paper(`10.1000/terminal-${targetStatus}`)]);
+
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'restricted', targetStatus }));
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([404, 410])('keeps explicit target absence ahead of challenge text after fallback exhaustion (%s)', async targetStatus => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<p>CAPTCHA verification required</p>', targetStatus));
+    const paid = jest.fn(async () => response('paid', 'static', '<p>CAPTCHA verification required</p>', targetStatus));
+    const { discovery } = makeDiscovery(direct, paid);
+    const [enriched] = await discovery.enrich([paper(`10.1000/absence-${targetStatus}`)]);
+
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'not_found', reason: 'target_not_found' }));
+  });
+
+  it('keeps target 429 ahead of challenge text without switching providers', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<p>Checking your browser</p>', 429));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/should-not-run.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const [enriched] = await discovery.enrich([paper('10.1000/rate-challenge')]);
+
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'failed', reason: 'target_rate_limited' }));
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not classify access-policy or CAPTCHA research text as a page gate', async () => {
+    const direct = jest.fn(async () => response(
+      'direct',
+      'direct',
+      '<article><p>This study evaluates paywall policy and CAPTCHA attacks.</p><a href="https://publisher.example/research.pdf">PDF</a></article>'
+    ));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/should-not-run.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true));
+    const [enriched] = await discovery.enrich([paper('10.1000/research-text')]);
+
+    expect(enriched.pdfUrl).toBe('https://publisher.example/research.pdf');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'oa_candidate' }));
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it('retries an ordinary direct 5xx response before paid fallback', async () => {
+    const direct = jest.fn() as RetrieveMock;
+    direct
+      .mockResolvedValueOnce(response('direct', 'direct', '<p>Temporary failure</p>', 503))
+      .mockResolvedValueOnce(response('direct', 'direct', '<a href="https://publisher.example/recovered.pdf">PDF</a>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const base = configuration(true);
+    const service = new RetrievalService({
+      directProvider: provider('direct', direct),
+      scrapingAntProvider: provider('paid', paid),
+      configuration: base,
+      costPolicy: new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: true }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl }),
+      retrySleep: async () => undefined
+    });
+    const discovery = new PublicAccessDiscovery(undefined, {
+      retrievalService: service,
+      publicHttpRequester: makeDoiRequester(),
+      validateUrl
+    });
+    const [enriched] = await discovery.enrich([paper('10.1000/direct-retry')]);
+
+    expect(enriched.pdfUrl).toBe('https://publisher.example/recovered.pdf');
+    expect(direct).toHaveBeenCalledTimes(2);
+    expect(paid).not.toHaveBeenCalled();
+  });
+
+  it('allows an explicitly extended discovery scope up to the operation bound', async () => {
+    jest.useFakeTimers();
+    try {
+      const direct = jest.fn(async () => {
+        await new Promise<void>(resolve => setTimeout(resolve, TIMEOUTS.EXTENDED + 70));
+        return response('direct', 'direct', '<a href="https://publisher.example/extended.pdf">PDF</a>');
+      });
+      const { discovery, service } = makeDiscovery(
+        direct,
+        undefined,
+        configuration(false),
+        makeDoiRequester(),
+        RETRIEVAL_OPERATION_TIMEOUT_MS
+      );
+      const operation = service.createOperation({ timeoutMs: RETRIEVAL_OPERATION_TIMEOUT_MS });
+      try {
+        const pending = discovery.enrich([paper('10.1000/extended-discovery')], { operation });
+        await jest.advanceTimersByTimeAsync(TIMEOUTS.EXTENDED + 70);
+        const [enriched] = await pending;
+
+        expect(enriched.pdfUrl).toBe('https://publisher.example/extended.pdf');
+        expect(direct).toHaveBeenCalledTimes(1);
+      } finally {
+        operation.dispose();
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps a completed discovery scope deadline for later verification calls', async () => {
+    jest.useFakeTimers();
+    try {
+      const requester = makeDoiRequester();
+      const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/scope.pdf">PDF</a>'));
+      const { discovery, service } = makeDiscovery(direct, undefined, configuration(false), requester, 10);
+      const operation = service.createOperation({ timeoutMs: 100 });
+      try {
+        const [base] = await discovery.enrich([paper('10.1000/scope')], { operation, verifyPdf: false });
+        await jest.advanceTimersByTimeAsync(11);
+        const [verified] = await discovery.enrich([paper('10.1000/scope')], { operation, verifyPdf: true });
+
+        expect(base.extra?.accessDiscovery?.verification).toBeUndefined();
+        expect(verified.pdfUrl).toBe('https://publisher.example/scope.pdf');
+        expect(verified.extra?.accessDiscovery).toEqual(expect.objectContaining({
+          status: 'oa_candidate',
+          verification: { status: 'inconclusive', reason: 'aborted_or_timeout' }
+        }));
+        expect(direct).toHaveBeenCalledTimes(1);
+        expect(requester.request.mock.calls.some(call => String(call[0]?.url).endsWith('.pdf'))).toBe(false);
+      } finally {
+        operation.dispose();
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps a candidate when optional verification reaches the discovery deadline first', async () => {
+    jest.useFakeTimers();
+    try {
+      const stalled: AsyncIterable<Uint8Array> & { destroy: jest.Mock } = {
+        destroy: jest.fn(),
+        [Symbol.asyncIterator]: () => ({
+          next: async () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+          return: async () => ({ done: true, value: undefined })
+        })
+      };
+      const requester = makeDoiRequester('https://publisher.example/article', stalled);
+      const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/deadline.pdf">PDF</a>'));
+      const { discovery } = makeDiscovery(direct, undefined, configuration(false), requester, 10);
+      const pending = discovery.enrich([paper('10.1000/verify-deadline')], { verifyPdf: true });
+      await jest.advanceTimersByTimeAsync(10);
+      const [enriched] = await pending;
+
+      expect(enriched.pdfUrl).toBe('https://publisher.example/deadline.pdf');
+      expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({
+        status: 'oa_candidate',
+        verification: expect.objectContaining({ status: 'inconclusive' })
+      }));
+      expect(stalled.destroy).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('isolates verification snapshots for repeated true callers', async () => {
+    const requester = makeDoiRequester();
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/snapshot.pdf">PDF</a>'));
+    const { discovery, service } = makeDiscovery(direct, undefined, configuration(false), requester);
+    const operation = service.createOperation();
+    try {
+      const [first] = await discovery.enrich([paper('10.1000/snapshot')], { operation, verifyPdf: true });
+      const [second] = await discovery.enrich([paper('10.1000/snapshot')], { operation, verifyPdf: true });
+      (first.extra!.accessDiscovery!.verification as any).status = 'failed';
+      const [third] = await discovery.enrich([paper('10.1000/snapshot')], { operation, verifyPdf: true });
+
+      expect(second.extra?.accessDiscovery?.verification?.status).toBe('verified');
+      expect(third.extra?.accessDiscovery?.verification?.status).toBe('verified');
+      expect(requester.request.mock.calls.filter(call => String(call[0]?.url).endsWith('.pdf'))).toHaveLength(1);
+    } finally {
+      operation.dispose();
+    }
+  });
+
   it('prioritizes a target server error over a PDF-looking link', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/error.pdf">PDF</a>', 500));
     const { discovery } = makeDiscovery(direct, undefined, configuration(false));
@@ -389,15 +942,25 @@ describe('PublicAccessDiscovery', () => {
     expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'failed', reason: 'direct_failed', targetStatus: 500 }));
   });
 
-  it('treats a target server error with challenge evidence as restricted before paid fallback', async () => {
+  it('allows an ordinary challenge page to reach the bounded paid chain without promoting its link', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<p>CAPTCHA verification required</p><a href="https://publisher.example/direct.pdf">PDF</a>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/challenge-fallback.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true));
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.pdfUrl).toBe('https://publisher.example/challenge-fallback.pdf');
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a target server error with challenge evidence as a fallback trigger', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<p>CAPTCHA verification required</p><a href="https://publisher.example/error.pdf">PDF</a>', 503));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
     const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true));
     const [enriched] = await discovery.enrich([paper()]);
 
-    expect(enriched.pdfUrl).toBe('');
-    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'restricted', targetStatus: 503 }));
-    expect(paidSpy).not.toHaveBeenCalled();
+    expect(enriched.pdfUrl).toBe('https://publisher.example/paid.pdf');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'oa_candidate', strategy: 'static' }));
+    expect(paidSpy).toHaveBeenCalledTimes(1);
   });
 
   it('prioritizes body restriction over a target not-found status', async () => {
@@ -410,16 +973,16 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy).not.toHaveBeenCalled();
   });
 
-  it.each([302, 400])('does not use a non-success target status %s to authorize a dynamic fallback', async targetStatus => {
+  it.each([302, 400])('allows an ordinary non-success target status %s to use the bounded fallback', async targetStatus => {
     const dynamic = '<div id="pdf"></div><script src="/app.js"></script>';
     const direct = jest.fn(async () => response('direct', 'direct', dynamic, targetStatus));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
     const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
     const [enriched] = await discovery.enrich([paper()]);
 
-    expect(enriched.pdfUrl).toBe('');
-    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'failed', targetStatus }));
-    expect(paidSpy).not.toHaveBeenCalled();
+    expect(enriched.pdfUrl).toBe('https://publisher.example/paid.pdf');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'oa_candidate', strategy: 'static' }));
+    expect(paidSpy).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a login redirect before contacting the redirected target', async () => {
@@ -444,13 +1007,23 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy).not.toHaveBeenCalled();
   });
 
-  it.each([407, 429, 423])('treats target status %s as restricted before paid fallback', async targetStatus => {
+  it.each([407, 423])('treats target status %s as restricted before paid fallback', async targetStatus => {
     const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/target.pdf">PDF</a>', targetStatus));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
     const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
     const [enriched] = await discovery.enrich([paper()]);
 
     expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'restricted', targetStatus }));
+    expect(paidSpy).not.toHaveBeenCalled();
+  });
+
+  it('stops at a target rate limit without switching providers', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/target.pdf">PDF</a>', 429));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'failed', reason: 'target_rate_limited', targetStatus: 429 }));
     expect(paidSpy).not.toHaveBeenCalled();
   });
 
@@ -487,7 +1060,7 @@ describe('PublicAccessDiscovery', () => {
       }
     }));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));
-    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(false));
     const [enriched] = await discovery.enrich([paper()]);
 
     expect(enriched.pdfUrl).toBe('');
@@ -498,7 +1071,7 @@ describe('PublicAccessDiscovery', () => {
   it('does not resolve relative links from an unknown ScrapingAnt provenance', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<div id="pdf"></div><script src="/app.js"></script>'));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="/relative.pdf">PDF</a>'));
-    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid);
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true, false));
     const [enriched] = await discovery.enrich([paper()]);
 
     expect(enriched.pdfUrl).toBe('');
@@ -506,7 +1079,7 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('does not escalate a dynamic page when the target status is unknown', async () => {
+  it('allows an unknown-status page to use the bounded fallback', async () => {
     const direct = jest.fn(async () => ({
       ...response('direct', 'direct', '<p>Enable JavaScript</p>'),
       targetStatus: undefined,
@@ -519,8 +1092,9 @@ describe('PublicAccessDiscovery', () => {
     const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true, true));
     const [enriched] = await discovery.enrich([paper()]);
 
-    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'failed', reason: 'target_status_unknown' }));
-    expect(paidSpy).not.toHaveBeenCalled();
+    expect(enriched.pdfUrl).toBe('https://publisher.example/browser.pdf');
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'oa_candidate', strategy: 'static' }));
+    expect(paidSpy).toHaveBeenCalledTimes(1);
   });
 
   it('reports a browser-stage security rejection as restricted', async () => {
@@ -555,6 +1129,61 @@ describe('PublicAccessDiscovery', () => {
     expect(paidSpy.mock.calls.map(call => call[0]?.strategy)).toEqual(['static', 'browser']);
   });
 
+  it('advances through each authorised paid combination without restarting the scope', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<div id="pdf"></div><script src="/viewer.js"></script>'));
+    const paid = jest.fn(async (request: RetrievalRequest) => {
+      if (request.proxyType === 'datacenter' && request.strategy === 'static') {
+        throw new RetrievalError({ code: 'network', message: 'temporary static failure', provider: 'paid', retryable: true, cost: { known: true, credits: 1 } });
+      }
+      if (request.proxyType === 'datacenter' && request.strategy === 'browser') {
+        throw new RetrievalError({ code: 'network', message: 'temporary browser failure', provider: 'paid', retryable: true, cost: { known: true, credits: 1 } });
+      }
+      return response('paid', 'static', '<a href="https://publisher.example/residential.pdf">PDF</a>');
+    });
+    const base = configuration(true, true);
+    const config: RetrievalConfiguration = {
+      ...base,
+      scrapingAnt: {
+        ...base.scrapingAnt,
+        residentialAllowed: true,
+        proxyType: 'residential',
+        availableProxyTypes: ['datacenter', 'residential'],
+        maxCreditsPerOperation: 500,
+        maxCreditsPerRequest: 125
+      }
+    };
+    const service = new RetrievalService({
+      directProvider: provider('direct', direct),
+      scrapingAntProvider: {
+        name: 'paid',
+        capabilities: {
+          ...paidCapabilities,
+          proxyTypes: ['datacenter', 'residential'],
+          combinations: ['static:datacenter', 'browser:datacenter', 'static:residential', 'browser:residential']
+        },
+        retrieve: paid
+      },
+      configuration: config,
+      costPolicy: new RetrievalCostPolicy({ budget: 500, maxCreditsPerRequest: 125, enabled: true }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl }),
+      retrySleep: async () => undefined
+    });
+    const requester = makeDoiRequester();
+    const discovery = new PublicAccessDiscovery(undefined, {
+      retrievalService: service,
+      publicHttpRequester: requester,
+      validateUrl
+    });
+
+    const [enriched] = await discovery.enrich([paper()]);
+
+    expect(enriched.pdfUrl).toBe('https://publisher.example/residential.pdf');
+    expect(paid.mock.calls.map(([request]) => `${request.proxyType}:${request.strategy}`)).toEqual([
+      'datacenter:static', 'datacenter:static', 'datacenter:static',
+      'datacenter:browser', 'residential:static'
+    ]);
+  });
+
   it('allows one browser escalation for the approved PDF iframe shape', async () => {
     const dynamic = '<iframe class="pdf-viewer" data-src="https://cdn.publisher.example/view"></iframe>';
     const direct = jest.fn(async () => response('direct', 'direct', dynamic));
@@ -582,7 +1211,7 @@ describe('PublicAccessDiscovery', () => {
     const dynamic = '<iframe class="pdf-viewer" data-src="/viewer"></iframe>';
     const direct = jest.fn(async () => response('direct', 'direct', '<div id="pdf"></div><script src="/app.js"></script>'));
     const paid = jest.fn(async () => response('paid', 'static', dynamic));
-    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true, true));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true, false));
     const [enriched] = await discovery.enrich([paper()]);
 
     expect(enriched.pdfUrl).toBe('');
@@ -595,12 +1224,13 @@ describe('PublicAccessDiscovery', () => {
     'http://127.0.0.1/view',
     'https://private.example/view',
     'https://publisher.example/sso/view'
-  ])('does not authorize browser escalation for an unsafe PDF iframe data source %s', async dataSrc => {
+  ])('does not promote an unsafe PDF iframe data source %s when paid fallback is disabled', async dataSrc => {
     const direct = jest.fn(async () => response('direct', 'direct', `<iframe class="pdf-viewer" data-src="${dataSrc}"></iframe>`));
     const paid = jest.fn(async () => response('paid', 'browser', '<a href="https://publisher.example/browser.pdf">PDF</a>'));
-    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(true, true));
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, configuration(false));
     const [enriched] = await discovery.enrich([paper()]);
 
+    expect(enriched.pdfUrl).toBe('');
     expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'not_found', reason: 'no_candidate' }));
     expect(paidSpy).not.toHaveBeenCalled();
   });
@@ -745,6 +1375,34 @@ describe('PublicAccessDiscovery', () => {
     expect(requester.request.mock.calls.some(call => call[0].url === second)).toBe(false);
   });
 
+  it('shares discovery while keeping verifyPdf as an independent one-shot step', async () => {
+    const requester = makeDoiRequester();
+    const direct = jest.fn(async () => response('direct', 'direct', '<a href="https://publisher.example/shared.pdf">PDF</a>'));
+    const { discovery, service } = makeDiscovery(direct, undefined, configuration(false), requester);
+    const operation = service.createOperation();
+    try {
+      const [withoutVerification, withVerification] = await Promise.all([
+        discovery.enrich([paper('10.1000/shared')], { operation, verifyPdf: false }),
+        discovery.enrich([paper('10.1000/shared')], { operation, verifyPdf: true })
+      ]);
+
+      expect(withoutVerification[0].extra?.accessDiscovery).toEqual(expect.objectContaining({
+        status: 'oa_candidate',
+        candidateUrl: 'https://publisher.example/shared.pdf'
+      }));
+      expect(withoutVerification[0].extra?.accessDiscovery?.verification).toBeUndefined();
+      expect(withVerification[0].extra?.accessDiscovery).toEqual(expect.objectContaining({
+        status: 'pdf_verified',
+        verification: expect.objectContaining({ status: 'verified' })
+      }));
+      expect(direct).toHaveBeenCalledTimes(1);
+      expect(requester.request.mock.calls.filter(call => call[0].url?.includes('doi.org'))).toHaveLength(1);
+      expect(requester.request.mock.calls.filter(call => call[0].url?.endsWith('.pdf'))).toHaveLength(1);
+    } finally {
+      operation.dispose();
+    }
+  });
+
   it('settles a stalled DOI resolution as failed without direct dispatch', async () => {
     jest.useFakeTimers();
     try {
@@ -818,6 +1476,30 @@ describe('PublicAccessDiscovery', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('rejects credential-bearing PDF redirect targets before probing them', async () => {
+    const candidate = 'https://publisher.example/signed.pdf';
+    const credentialTarget = 'https://cdn.example/signed.pdf?access_token=sentinel';
+    const requester = {
+      request: jest.fn(async (config: { url?: string }) => {
+        const url = config.url || '';
+        if (url.includes('doi.org')) return { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined };
+        if (url === candidate) return { status: 302, headers: { location: credentialTarget }, data: undefined };
+        return { status: 200, headers: { 'content-type': 'application/pdf' }, data: Buffer.from('%PDF-should-not-fetch') };
+      })
+    };
+    const direct = jest.fn(async () => response('direct', 'direct', `<a href="${candidate}">PDF</a>`));
+    const { discovery } = makeDiscovery(direct, undefined, configuration(false), requester as any);
+    const [enriched] = await discovery.enrich([paper('10.1000/signed-redirect')], { verifyPdf: true });
+
+    expect(enriched.pdfUrl).toBe(candidate);
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({
+      status: 'oa_candidate',
+      verification: { status: 'failed', reason: 'restricted_target' }
+    }));
+    expect(requester.request.mock.calls.some(call => String(call[0].url).includes('access_token'))).toBe(false);
+    expect(JSON.stringify(enriched)).not.toContain('sentinel');
   });
 
   it('keeps the candidate but rejects a PDF probe redirected to a login target', async () => {

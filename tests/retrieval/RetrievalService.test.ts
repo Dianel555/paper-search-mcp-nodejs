@@ -4,6 +4,10 @@ import { RetrievalCostPolicy } from '../../src/retrieval/RetrievalCostPolicy.js'
 import { parseRetrievalConfiguration } from '../../src/retrieval/Configuration.js';
 import { RetrievalService } from '../../src/retrieval/RetrievalService.js';
 import { RetrievalError } from '../../src/retrieval/types.js';
+import { DirectHttpProvider } from '../../src/retrieval/DirectHttpProvider.js';
+import { ScrapingAntProvider } from '../../src/retrieval/ScrapingAntProvider.js';
+import { PublicHttpClient } from '../../src/services/PublicHttpClient.js';
+import { PublicSourceDispatchScheduler } from '../../src/services/PublicSourceDispatchScheduler.js';
 import type {
   RetrievalCostObservation,
   RetrievalOperationContext,
@@ -101,6 +105,77 @@ const paidRequest = {
 };
 
 describe('RetrievalService', () => {
+  it('creates purpose-specific ledgers without upgrading supplied or mixed-purpose operations', async () => {
+    const configuration = parseRetrievalConfiguration({
+      SCRAPINGANT_API_KEY: 'test-key',
+      SCRAPINGANT_ENABLED: 'true',
+      SCRAPINGANT_ALLOW_RESIDENTIAL: 'true',
+      SCRAPINGANT_PROXY_TYPE: 'datacenter'
+    });
+    const service = new RetrievalService({
+      directProvider: provider('direct', async () => response('direct', 'direct', { known: true, credits: 0 })),
+      scrapingAntProvider: provider('paid', async () => response('paid')),
+      configuration,
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl })
+    });
+
+    await service.withOperation(async operation => {
+      expect(operation.cost.snapshot().budget).toBe(500);
+    }, { purpose: 'publisher_discovery' });
+    await service.withOperation(async operation => {
+      expect(operation.cost.snapshot().budget).toBe(500);
+    }, { purpose: 'scholar_search' });
+    await service.withOperation(async operation => {
+      expect(operation.cost.snapshot().budget).toBe(50);
+    }, { purpose: 'unknown' });
+    await service.withOperation(async operation => {
+      expect(operation.cost.snapshot().budget).toBe(50);
+    }, { purpose: undefined });
+
+    const supplied = service.createOperation();
+    expect(supplied.cost.snapshot().budget).toBe(50);
+    await expect(service.retrieve({
+      ...paidRequest,
+      strategy: 'direct',
+      documentFormat: 'html'
+    }, supplied)).resolves.toBeDefined();
+    expect(supplied.cost.snapshot().budget).toBe(50);
+    supplied.dispose();
+
+    const seenBudgets: number[] = [];
+    const mixedService = new RetrievalService({
+      directProvider: provider('direct', async (_request, operation) => {
+        seenBudgets.push(operation.cost.snapshot().budget);
+        return response('direct', 'direct', { known: true, credits: 0 });
+      }),
+      scrapingAntProvider: provider('paid', async () => response('paid')),
+      configuration,
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl })
+    });
+    await mixedService.retrieveWithStrategies([
+      { request: { ...paidRequest, strategy: 'direct', documentFormat: 'html' } },
+      { request: { ...paidRequest, purpose: 'scholar_search', strategy: 'direct', documentFormat: 'html' } }
+    ]);
+    expect(seenBudgets).toEqual([50, 50]);
+
+    const explicitConfiguration = parseRetrievalConfiguration({
+      SCRAPINGANT_API_KEY: 'test-key',
+      SCRAPINGANT_ENABLED: 'true',
+      SCRAPINGANT_ALLOW_RESIDENTIAL: 'true',
+      SCRAPINGANT_MAX_CREDITS_PER_OPERATION: '17',
+      SCRAPINGANT_MAX_CREDITS_PER_REQUEST: '4'
+    });
+    const explicitService = new RetrievalService({
+      directProvider: provider('direct', async () => response('direct', 'direct', { known: true, credits: 0 })),
+      scrapingAntProvider: provider('paid', async () => response('paid')),
+      configuration: explicitConfiguration,
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl })
+    });
+    await explicitService.withOperation(async operation => {
+      expect(operation.cost.snapshot().budget).toBe(17);
+    }, { purpose: 'publisher_discovery' });
+  });
+
   it('cancels a queued request when its independent request signal aborts', async () => {
     let releaseFirst!: () => void;
     let firstStarted!: () => void;
@@ -187,23 +262,53 @@ describe('RetrievalService', () => {
     secondOperation.dispose();
   });
 
-  it('shares one parent budget and closes future paid dispatch after unknown cost', async () => {
+  it('shares one parent budget while continuing paid dispatch after unknown cost', async () => {
     const retrieve = jest.fn(async () => response('paid', 'static', { known: false, credits: null, reason: 'missing_billing_header' }));
     const direct = jest.fn(async () => response('direct', 'direct', { known: true, credits: 0 }));
     const service = serviceWith(retrieve, direct, { budget: 10 });
 
     await service.withOperation(async operation => {
       await expect(service.retrieve(paidRequest, operation)).resolves.toBeDefined();
-      await expect(service.retrieve(paidRequest, operation)).rejects.toMatchObject({ code: 'budget' });
+      await expect(service.retrieve(paidRequest, operation)).resolves.toBeDefined();
       await expect(service.retrieve({ ...paidRequest, strategy: 'direct', documentFormat: 'html' }, operation)).resolves.toBeDefined();
-      expect(retrieve).toHaveBeenCalledTimes(1);
+      expect(retrieve).toHaveBeenCalledTimes(2);
       expect(direct).toHaveBeenCalledTimes(1);
       expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
-        admissionUsed: 1,
-        unknownCostAttempts: 1,
-        paidClosed: true
+        admissionUsed: 2,
+        unknownCostAttempts: 2,
+        reportedCreditsKnown: false,
+        paidClosed: false
       }));
     });
+  });
+
+  it('notifies benchmark callers with a sanitized error and linked reservation', async () => {
+    const onError = jest.fn();
+    const retrieve = jest.fn(async () => {
+      throw new RetrievalError({
+        code: 'timeout',
+        message: 'provider detail must not escape',
+        provider: 'paid',
+        failureKind: 'transport_timeout',
+        cost: { known: false, credits: null, reason: 'provider_timeout' }
+      });
+    });
+    const service = serviceWith(retrieve);
+    const operation = service.createOperation({ onError, purpose: 'publisher_discovery' });
+
+    await expect(service.retrieve(paidRequest, operation)).rejects.toMatchObject({
+      code: 'timeout',
+      failureKind: 'transport_timeout',
+      cost: { known: false, credits: null, reason: 'provider_timeout' }
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      code: 'timeout',
+      failureKind: 'transport_timeout',
+      cost: { known: false, credits: null }
+    });
+    expect(onError.mock.calls[0][1]).toEqual(expect.objectContaining({ estimate: 1 }));
+    operation.dispose();
   });
 
   it('does not share budgets between independent operations', async () => {
@@ -297,6 +402,161 @@ describe('RetrievalService', () => {
     expect(sleeps).toEqual([0, 0]);
   });
 
+  it('retries a static unknown-cost failure while local admission remains available', async () => {
+    const strategies: string[] = [];
+    const retrieve = jest.fn(async (request: RetrievalRequest) => {
+      strategies.push(request.strategy);
+      if (strategies.length === 1) {
+        throw new RetrievalError({
+          code: 'detected',
+          message: 'temporary provider detection',
+          provider: 'paid',
+          retryable: true,
+          cost: { known: false, credits: null, reason: 'missing_billing_header' }
+        });
+      }
+      return response('paid', 'static', { known: true, credits: 1 });
+    });
+    const service = serviceWith(retrieve, undefined, {
+      budget: 10,
+      retrySleep: async () => undefined,
+      retryRandom: () => 0
+    });
+
+    await service.withOperation(async operation => {
+      await expect(service.retrieveWithRetry(paidRequest, operation)).resolves.toBeDefined();
+      expect(strategies).toEqual(['static', 'static']);
+      expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
+        admissionUsed: 2,
+        reportedCredits: 1,
+        reportedCreditsKnown: false,
+        unknownCostAttempts: 1,
+        paidClosed: false
+      }));
+    });
+  });
+
+  it('continues to the next paid combination after bounded unknown-cost retries', async () => {
+    const combinations: string[] = [];
+    const retrieve = jest.fn(async (request: RetrievalRequest) => {
+      combinations.push(`${request.strategy}:${request.proxyType}`);
+      if (request.strategy === 'static') {
+        throw new RetrievalError({
+          code: 'detected',
+          message: 'temporary provider detection',
+          provider: 'paid',
+          retryable: true,
+          cost: { known: false, credits: null, reason: 'missing_billing_header' }
+        });
+      }
+      return response('paid', 'browser', { known: true, credits: 1 });
+    });
+    const service = serviceWith(retrieve, undefined, {
+      budget: 50,
+      retrySleep: async () => undefined,
+      retryRandom: () => 0,
+      browserAllowed: true
+    });
+    const operation = service.createOperation();
+    try {
+      const result = await service.retrieveWithStrategies([
+        {
+          request: { ...paidRequest, strategy: 'static', proxyType: 'datacenter' },
+          continueOnError: () => true
+        },
+        {
+          request: { ...paidRequest, strategy: 'browser', proxyType: 'datacenter' },
+          isTerminalResponse: () => true
+        }
+      ], operation, { maxPaidStrategySelections: 4, maxBrowserDispatches: 2 });
+
+      expect(result.strategy).toBe('browser');
+      expect(combinations).toEqual(['static:datacenter', 'static:datacenter', 'static:datacenter', 'browser:datacenter']);
+      expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
+        admissionUsed: 13,
+        reportedCredits: 1,
+        reportedCreditsKnown: false,
+        unknownCostAttempts: 3,
+        paidClosed: false
+      }));
+    } finally {
+      operation.dispose();
+    }
+  });
+
+  it('does not let unknown billing bypass a terminal provider failure', async () => {
+    let attempts = 0;
+    const retrieve = jest.fn(async () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new RetrievalError({
+          code: 'detected',
+          message: 'temporary provider detection',
+          provider: 'paid',
+          retryable: true,
+          cost: { known: false, credits: null, reason: 'missing_billing_header' }
+        });
+      }
+      throw new RetrievalError({
+        code: 'auth_or_credits_unknown',
+        message: 'provider authorization failed',
+        provider: 'paid',
+        apiStatus: 403,
+        cost: { known: false, credits: null, reason: 'missing_billing_header' }
+      });
+    });
+    const service = serviceWith(retrieve, undefined, {
+      budget: 10,
+      retrySleep: async () => undefined,
+      retryRandom: () => 0
+    });
+
+    await service.withOperation(async operation => {
+      await expect(service.retrieveWithRetry(paidRequest, operation)).rejects.toMatchObject({
+        code: 'auth_or_credits_unknown',
+        apiStatus: 403
+      });
+      expect(attempts).toBe(2);
+      expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
+        admissionUsed: 2,
+        unknownCostAttempts: 2,
+        reportedCreditsKnown: false,
+        paidClosed: true,
+        paidClosedReason: 'provider_error'
+      }));
+    });
+  });
+
+  it('keeps full-jitter retry delays within the 250ms and 500ms bounds', async () => {
+    let attempts = 0;
+    const retrieve = jest.fn(async () => {
+      attempts++;
+      if (attempts < 3) {
+        throw new RetrievalError({
+          code: 'server_error',
+          message: 'temporary',
+          provider: 'paid',
+          status: 503,
+          retryable: true,
+          cost: { known: true, credits: 1 }
+        });
+      }
+      return response('paid');
+    });
+    const sleeps: number[] = [];
+    const service = serviceWith(retrieve, undefined, {
+      retrySleep: async milliseconds => { sleeps.push(milliseconds); },
+      retryRandom: () => 1
+    });
+
+    await service.withOperation(operation => service.retrieveWithRetry({ ...paidRequest, strategy: 'static' }, operation));
+    expect(sleeps).toHaveLength(2);
+    expect(sleeps[0]).toBeGreaterThanOrEqual(0);
+    expect(sleeps[0]).toBeLessThanOrEqual(250);
+    expect(sleeps[1]).toBeGreaterThanOrEqual(0);
+    expect(sleeps[1]).toBeLessThanOrEqual(500);
+  });
+
   it('cancels retry backoff without dispatching the next attempt', async () => {
     let retrySleepStarted!: () => void;
     const retrySleep = jest.fn((_milliseconds: number, signal?: AbortSignal) => {
@@ -362,9 +622,113 @@ describe('RetrievalService', () => {
     const service = serviceWith(retrieve, undefined, { browserAllowed: true });
     const operation = service.createOperation();
     await expect(service.retrieveWithRetry({ ...paidRequest, strategy: 'browser' }, operation)).resolves.toBeDefined();
-    await expect(service.retrieveWithRetry({ ...paidRequest, strategy: 'browser' }, operation)).rejects.toMatchObject({ code: 'budget' });
+    await expect(service.retrieveWithRetry({ ...paidRequest, strategy: 'browser' }, operation)).resolves.toBeDefined();
     expect(retrieve).toHaveBeenCalledTimes(1);
     expect(service.getOperationStatus(operation).strategyCounts.browser).toBe(1);
+    operation.dispose();
+  });
+
+  it('counts dispatches per normalized combination and permits the two browser combinations independently', async () => {
+    const retrieve = jest.fn(async (request: RetrievalRequest) => response('paid', request.strategy));
+    const configuration = parseRetrievalConfiguration({
+      SCRAPINGANT_API_KEY: 'key',
+      SCRAPINGANT_ENABLED: 'true',
+      SCRAPINGANT_ALLOW_BROWSER_ESCALATION: 'true',
+      SCRAPINGANT_ALLOW_RESIDENTIAL: 'true',
+      SCRAPINGANT_PROXY_TYPE: 'residential'
+    });
+    const paidProvider: RetrievalProvider = {
+      ...provider('paid', retrieve),
+      capabilities: {
+        html: true,
+        iframeDocuments: true,
+        pdfCandidates: true,
+        browser: true,
+        paid: true,
+        proxyTypes: ['datacenter', 'residential'],
+        combinations: ['static:datacenter', 'browser:datacenter', 'static:residential', 'browser:residential']
+      }
+    };
+    const service = new RetrievalService({
+      directProvider: provider('direct', async () => response('direct', 'direct', { known: true, credits: 0 })),
+      scrapingAntProvider: paidProvider,
+      configuration,
+      costPolicy: new RetrievalCostPolicy({ budget: 200, maxCreditsPerRequest: 125, enabled: true }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl })
+    });
+    const operation = service.createOperation();
+    const scope = 'publisher-doi-scope';
+    const staticDc = { ...paidRequest, strategy: 'static' as const, proxyType: 'datacenter' as const };
+
+    try {
+      await expect(service.retrieveWithRetry(staticDc, operation, { strategyScopeId: scope }))
+        .resolves.toBeDefined();
+      await expect(service.retrieveWithRetry(staticDc, operation, { strategyScopeId: scope }))
+        .resolves.toBeDefined();
+      expect(retrieve).toHaveBeenCalledTimes(1);
+
+      await expect(service.retrieveWithRetry({ ...staticDc, strategy: 'browser' }, operation, { strategyScopeId: scope }))
+        .resolves.toBeDefined();
+      await expect(service.retrieveWithRetry({ ...staticDc, strategy: 'browser' }, operation, { strategyScopeId: scope }))
+        .resolves.toBeDefined();
+      await expect(service.retrieveWithRetry({ ...staticDc, strategy: 'browser', proxyType: 'residential' }, operation, { strategyScopeId: scope }))
+        .resolves.toBeDefined();
+    } finally {
+      operation.dispose();
+    }
+
+    expect(retrieve).toHaveBeenCalledTimes(3);
+    expect(service.getOperationStatus(operation).strategyCounts).toEqual(expect.objectContaining({ static: 1, browser: 2 }));
+  });
+
+  it('drops raw provider documents from completed strategy re-entry snapshots', async () => {
+    const retrieve = jest.fn(async () => ({
+      ...response('paid'),
+      document: {
+        ...response('paid').document!,
+        html: '<html>secret provider body</html>'
+      }
+    }));
+    const service = serviceWith(retrieve);
+    const operation = service.createOperation();
+    try {
+      const first = await service.retrieveWithRetry(paidRequest, operation, { strategyScopeId: 'bounded-cache' });
+      const second = await service.retrieveWithRetry(paidRequest, operation, { strategyScopeId: 'bounded-cache' });
+      expect(first.document?.html).toContain('secret provider body');
+      expect(second.document).toBeUndefined();
+      expect(JSON.stringify(second)).not.toContain('secret provider body');
+      expect(retrieve).toHaveBeenCalledTimes(1);
+    } finally {
+      operation.dispose();
+    }
+  });
+
+  it('shares one strategy flight across concurrent waiters while isolating waiter cancellation', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const retrieve = jest.fn(async () => {
+      started();
+      await gate;
+      return response('paid');
+    });
+    const service = serviceWith(retrieve);
+    const operation = service.createOperation();
+    const firstController = new AbortController();
+    const first = service.retrieveWithRetry({ ...paidRequest, signal: firstController.signal }, operation, {
+      strategyScopeId: 'concurrent-scope'
+    });
+    await ready;
+    const second = service.retrieveWithRetry({ ...paidRequest }, operation, {
+      strategyScopeId: 'concurrent-scope'
+    });
+
+    firstController.abort();
+    await expect(first).rejects.toMatchObject({ code: 'cancelled' });
+    release();
+    await expect(second).resolves.toMatchObject({ combination: 'static:datacenter' });
+    expect(retrieve).toHaveBeenCalledTimes(1);
     operation.dispose();
   });
 
@@ -444,6 +808,125 @@ describe('RetrievalService', () => {
     expect(paidRetrieve).toHaveBeenCalledTimes(1);
   });
 
+  it('advances to the next combination after a reliable detected failure exhausts one static combination', async () => {
+    let staticAttempts = 0;
+    const retrieve = jest.fn(async (request: RetrievalRequest) => {
+      if (request.strategy === 'static') {
+        staticAttempts++;
+        throw new RetrievalError({
+          code: 'detected',
+          message: 'temporary detection',
+          provider: 'paid',
+          status: 423,
+          retryable: true,
+          cost: { known: true, credits: 1 }
+        });
+      }
+      return response('paid', request.strategy);
+    });
+    const service = serviceWith(retrieve, undefined, {
+      retrySleep: async () => undefined,
+      retryRandom: () => 0,
+      browserAllowed: true
+    });
+    const operation = service.createOperation();
+
+    try {
+      await expect(service.retrieveWithStrategies([
+        { request: paidRequest, continueOnError: () => true },
+        { request: { ...paidRequest, strategy: 'browser' }, continueOnError: () => true }
+      ], operation, { scopeId: 'detected-scope', maxPaidStrategySelections: 4, maxBrowserDispatches: 2 }))
+        .resolves.toMatchObject({ strategy: 'browser' });
+      expect(staticAttempts).toBe(3);
+      expect(retrieve).toHaveBeenCalledTimes(4);
+      expect(operation.cost.snapshot().paidClosed).toBe(false);
+    } finally {
+      operation.dispose();
+    }
+  });
+
+  it('advances Scholar from billed ScrapingAnt API 423 detections to browser retrieval', async () => {
+    let schedulerNow = 0;
+    const scheduler = new PublicSourceDispatchScheduler({
+      now: () => schedulerNow,
+      sleep: async milliseconds => {
+        schedulerNow += milliseconds;
+      }
+    });
+    const providerRequests: unknown[] = [];
+    const responses = [
+      { status: 423, headers: { 'Ant-credits-cost': '0' }, data: { detail: 'anti-bot' } },
+      { status: 423, headers: { 'Ant-credits-cost': '0' }, data: { detail: 'anti-bot' } },
+      { status: 423, headers: { 'Ant-credits-cost': '0' }, data: { detail: 'anti-bot' } },
+      { status: 200, headers: { 'Ant-credits-cost': '10' }, data: { html: '<html>browser result</html>' } }
+    ];
+    const paidProvider = new ScrapingAntProvider({
+      apiKey: 'test-key',
+      sourceScheduler: scheduler,
+      client: {
+        request: jest.fn(async config => {
+          providerRequests.push(config);
+          return responses.shift()!;
+        })
+      }
+    });
+    const baseConfiguration = parseRetrievalConfiguration({} as NodeJS.ProcessEnv);
+    const configuration = {
+      ...baseConfiguration,
+      scrapingAnt: {
+        ...baseConfiguration.scrapingAnt,
+        apiKey: 'test-key',
+        configured: true,
+        enabled: true,
+        paidEnabled: true,
+        browserAllowed: true,
+        availableProxyTypes: ['datacenter'] as const
+      }
+    };
+    const service = new RetrievalService({
+      directProvider: provider('direct', async () => response('direct', 'direct', { known: true, credits: 0 })),
+      scrapingAntProvider: paidProvider,
+      configuration,
+      costPolicy: new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: true }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl }),
+      retrySleep: async () => undefined,
+      retryRandom: () => 0
+    });
+    const operation = service.createOperation({ purpose: 'scholar_search' });
+    const request = {
+      url: 'https://scholar.google.com/scholar',
+      purpose: 'scholar_search' as const,
+      documentFormat: 'html' as const
+    };
+    try {
+      const result = await service.retrieveWithStrategies([
+        {
+          request: { ...request, strategy: 'direct' as const },
+          isTerminalResponse: () => false,
+          continueOnError: () => true
+        },
+        {
+          request: { ...request, strategy: 'static' as const },
+          continueOnError: () => true
+        },
+        {
+          request: { ...request, strategy: 'browser' as const },
+          continueOnError: () => true
+        }
+      ], operation, { scopeId: 'scholar-423-fallback', maxPaidStrategySelections: 4, maxBrowserDispatches: 2 });
+
+      expect(result.strategy).toBe('browser');
+      expect(providerRequests).toHaveLength(4);
+      expect((providerRequests[3] as any).params.browser).toBe(true);
+      expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
+        unknownCostAttempts: 0,
+        paidClosed: false
+      }));
+    } finally {
+      operation.dispose();
+    }
+  });
+
   it('limits a browser plan to one actual dispatch and does not bypass a provider error with paid retry', async () => {
     const staticRetrieve = jest.fn(async (_request?: unknown, _context?: unknown) => {
       throw new RetrievalError({ code: 'auth_or_credits_unknown', message: 'safe', provider: 'paid', status: 403, cost: { known: true, credits: 1 } });
@@ -470,10 +953,45 @@ describe('RetrievalService', () => {
       { request: paidRequest, continueOnError: () => true },
       { request: { ...paidRequest, strategy: 'browser' }, continueOnError: () => true },
       { request: { ...paidRequest, strategy: 'browser' } }
-    ], operation, { maxPaidStrategySelections: 3, maxBrowserDispatches: 1 })).rejects.toMatchObject({ code: 'budget' });
+    ], operation, { maxPaidStrategySelections: 3, maxBrowserDispatches: 1 })).rejects.toMatchObject({ code: 'auth_or_credits_unknown' });
     expect(staticRetrieve).toHaveBeenCalledTimes(1);
     expect(browserRetrieve).toHaveBeenCalledTimes(0);
     operation.dispose();
+  });
+
+  it('terminates paid strategy progression for global provider errors', async () => {
+    for (const [code, status] of [
+      ['invalid_request', 400],
+      ['auth_or_credits_unknown', 403],
+      ['target_unavailable', 404],
+      ['invalid_request', 405],
+      ['invalid_request', 422],
+      ['provider_error', 429]
+    ] as const) {
+      const retrieve = jest.fn(async () => {
+        throw new RetrievalError({
+          code,
+          message: 'provider failure',
+          provider: 'paid',
+          status,
+          apiStatus: status,
+          cost: { known: true, credits: 1 }
+        });
+      });
+      const service = serviceWith(retrieve, undefined, { browserAllowed: true });
+      const operation = service.createOperation();
+      try {
+        await expect(service.retrieveWithStrategies([
+          { request: paidRequest, continueOnError: () => true },
+          { request: { ...paidRequest, strategy: 'browser' } }
+        ], operation, { scopeId: `global-error-${status}`, maxPaidStrategySelections: 4, maxBrowserDispatches: 2 }))
+          .rejects.toMatchObject({ code });
+        expect(retrieve).toHaveBeenCalledTimes(1);
+        expect(operation.cost.snapshot().paidClosed).toBe(true);
+      } finally {
+        operation.dispose();
+      }
+    }
   });
 
   it('closes paid admission after a final failure through the single-attempt API', async () => {
@@ -563,7 +1081,7 @@ describe('RetrievalService', () => {
       expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
         admissionUsed: 2,
         reportedCredits: 2,
-        paidClosed: true
+        paidClosed: false
       }));
       operation.dispose();
     } finally {
@@ -749,7 +1267,7 @@ describe('RetrievalService', () => {
       reportedCredits: 3,
       reportedCreditsKnown: true,
       unknownCostAttempts: 0,
-      paidClosed: true
+      paidClosed: false
     }));
     expect(service.getProcessStatus()).toEqual(expect.objectContaining({
       reportedCredits: 3,
@@ -784,7 +1302,7 @@ describe('RetrievalService', () => {
       reportedCredits: 0,
       reportedCreditsKnown: false,
       unknownCostAttempts: 1,
-      paidClosed: true
+      paidClosed: false
     }));
 
     resolveLate(response('paid', 'static', { known: true, credits: 3 }));
@@ -797,7 +1315,7 @@ describe('RetrievalService', () => {
       reportedCredits: 3,
       reportedCreditsKnown: true,
       unknownCostAttempts: 0,
-      paidClosed: true
+      paidClosed: false
     }));
     expect(paidRetrieve).toHaveBeenCalledTimes(1);
     operation.dispose();
@@ -837,21 +1355,60 @@ describe('RetrievalService', () => {
       reportedCredits: 3,
       reportedCreditsKnown: true,
       unknownCostAttempts: 0,
-      paidClosed: true
+      paidClosed: false
     }));
     operation.dispose();
   });
 
-  it('allows safe direct retrieval after paid admission has closed', async () => {
-    const paidRetrieve = jest.fn(async () => response('paid', 'static', { known: false, credits: null }));
+  it('allows safe direct retrieval after a known paid cost exceeds the budget', async () => {
+    const paidRetrieve = jest.fn(async () => response('paid', 'static', { known: true, credits: 6 }));
     const directRetrieve = jest.fn(async () => response('direct', 'direct', { known: true, credits: 0 }));
-    const service = serviceWith(paidRetrieve, directRetrieve);
+    const service = serviceWith(paidRetrieve, directRetrieve, { budget: 5 });
 
     await service.withOperation(async operation => {
       await service.retrieve(paidRequest, operation);
+      expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
+        paidClosed: true,
+        paidClosedReason: 'actual_cost_exceeded'
+      }));
       await expect(service.retrieveWithRetry({ ...paidRequest, strategy: 'direct', documentFormat: 'html' }, operation)).resolves.toBeDefined();
     });
     expect(directRetrieve).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts each observable direct HTTP redirect separately from one retrieval attempt', async () => {
+    const clientRequest: any = jest.fn();
+    clientRequest.mockResolvedValueOnce({ status: 302, headers: { location: 'https://publisher.example/final' }, data: undefined });
+    clientRequest.mockResolvedValueOnce({ status: 200, headers: {}, data: '<html>ok</html>' });
+    const publicHttpClient = new (await import('../../src/services/PublicHttpClient.js')).PublicHttpClient({
+      client: { request: clientRequest },
+      validateUrl: async (url: string) => ({
+        url,
+        hostname: new URL(url).hostname,
+        addresses: [{ address: '93.184.216.34', family: 4 as const }]
+      })
+    });
+    const directProvider = new (await import('../../src/retrieval/DirectHttpProvider.js')).DirectHttpProvider({ publicHttpClient });
+    const service = new RetrievalService({
+      directProvider,
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl })
+    });
+    const operation = service.createOperation();
+
+    try {
+      await expect(service.retrieve({
+        url: 'https://publisher.example/start',
+        purpose: 'publisher_discovery',
+        strategy: 'direct',
+        documentFormat: 'html'
+      }, operation)).resolves.toMatchObject({ combination: 'direct:datacenter' });
+      expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
+        requestCount: 1,
+        httpDispatchCount: 2
+      }));
+    } finally {
+      operation.dispose();
+    }
   });
 
   it('rejects an unsafe target before dispatch', async () => {
@@ -890,6 +1447,185 @@ describe('RetrievalService', () => {
     await result;
     expect(retrieve).not.toHaveBeenCalled();
     operation.dispose();
+  });
+
+  it('does not let a cooling Scholar source occupy the shared transport slot', async () => {
+    jest.useFakeTimers();
+    let now = 0;
+    const scheduler = new PublicSourceDispatchScheduler({ now: () => now });
+    const request = jest.fn(async (_config: any) => ({ status: 200, headers: {}, data: '<html />' }));
+    const validate = async (url: string) => ({
+      url,
+      hostname: new URL(url).hostname,
+      addresses: [{ address: '93.184.216.34', family: 4 as const }]
+    });
+    const publisherClient = new PublicHttpClient({
+      purpose: 'publisher_discovery',
+      sourceScheduler: scheduler,
+      client: { request },
+      validateUrl: validate
+    });
+    const scholarClient = new PublicHttpClient({
+      purpose: 'scholar_search',
+      sourceScheduler: scheduler,
+      client: { request },
+      validateUrl: validate
+    });
+    const service = new RetrievalService({
+      directProvider: new DirectHttpProvider({
+        publicHttpClient: publisherClient,
+        publicHttpClients: { scholar_search: scholarClient }
+      }),
+      configuration: parseRetrievalConfiguration({} as NodeJS.ProcessEnv),
+      costPolicy: new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: false }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validate }),
+      maxConcurrency: 1,
+      operationTimeoutMs: 100_000,
+      now: () => now
+    });
+    scheduler.observeRetryAfter('https://scholar.google.com', 429, { 'retry-after': '10' });
+
+    try {
+      const scholar = service.retrieve({
+        url: 'https://scholar.google.com/scholar?q=waiting',
+        purpose: 'scholar_search',
+        strategy: 'direct',
+        documentFormat: 'html'
+      });
+      await Promise.resolve();
+      const publisher = service.retrieve({
+        url: 'https://publisher.example/article',
+        purpose: 'publisher_discovery',
+        strategy: 'direct',
+        documentFormat: 'html'
+      });
+
+      await expect(publisher).resolves.toBeDefined();
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0][0].url).toBe('https://publisher.example/article');
+
+      now = 10_000;
+      await jest.advanceTimersByTimeAsync(10_000);
+      await expect(scholar).resolves.toBeDefined();
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(request.mock.calls[1][0].url).toBe('https://scholar.google.com/scholar?q=waiting');
+    } finally {
+      scheduler.reset();
+      jest.useRealTimers();
+    }
+  });
+
+  it('records Scholar pacing after global-slot contention, not source-lease acquisition', async () => {
+    jest.useFakeTimers();
+    let now = 0;
+    const scheduler = new PublicSourceDispatchScheduler({ now: () => now });
+    let releasePublisher!: () => void;
+    const publisherGate = new Promise<void>(resolve => { releasePublisher = resolve; });
+    const scholarDispatchTimes: number[] = [];
+    const request = jest.fn(async (config: any) => {
+      const url = String(config.url);
+      if (url.startsWith('https://publisher.example')) {
+        await publisherGate;
+      } else {
+        scholarDispatchTimes.push(now);
+      }
+      return { status: 200, headers: {}, data: '<html />' };
+    });
+    const validate = async (url: string) => ({
+      url,
+      hostname: new URL(url).hostname,
+      addresses: [{ address: '93.184.216.34', family: 4 as const }]
+    });
+    const publisherClient = new PublicHttpClient({ purpose: 'publisher_discovery', sourceScheduler: scheduler, client: { request }, validateUrl: validate });
+    const scholarClient = new PublicHttpClient({ purpose: 'scholar_search', sourceScheduler: scheduler, client: { request }, validateUrl: validate });
+    const service = new RetrievalService({
+      directProvider: new DirectHttpProvider({ publicHttpClient: publisherClient, publicHttpClients: { scholar_search: scholarClient } }),
+      configuration: parseRetrievalConfiguration({} as NodeJS.ProcessEnv),
+      costPolicy: new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: false }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validate }),
+      maxConcurrency: 1,
+      operationTimeoutMs: 100_000,
+      now: () => now
+    });
+
+    try {
+      const publisher = service.retrieve({ url: 'https://publisher.example/article', purpose: 'publisher_discovery', strategy: 'direct', documentFormat: 'html' });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledTimes(1);
+
+      now = 10_000;
+      const firstScholar = service.retrieve({ url: 'https://scholar.google.com/scholar?q=one', purpose: 'scholar_search', strategy: 'direct', documentFormat: 'html' });
+      const secondScholar = service.retrieve({ url: 'https://scholar.google.com/scholar?q=two', purpose: 'scholar_search', strategy: 'direct', documentFormat: 'html' });
+      await Promise.resolve();
+      releasePublisher();
+      await expect(publisher).resolves.toBeDefined();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scholarDispatchTimes).toEqual([10_000]);
+
+      now = 12_999;
+      await jest.advanceTimersByTimeAsync(2_999);
+      expect(scholarDispatchTimes).toEqual([10_000]);
+      now = 13_000;
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(firstScholar).resolves.toBeDefined();
+      await expect(secondScholar).resolves.toBeDefined();
+      expect(scholarDispatchTimes).toEqual([10_000, 13_000]);
+    } finally {
+      scheduler.reset();
+      jest.useRealTimers();
+    }
+  });
+
+  it('cancels a transport queued behind the global slot without dispatch accounting', async () => {
+    jest.useFakeTimers();
+    let now = 0;
+    const scheduler = new PublicSourceDispatchScheduler({ now: () => now });
+    let releasePublisher!: () => void;
+    const publisherGate = new Promise<void>(resolve => { releasePublisher = resolve; });
+    const request = jest.fn(async (config: any) => {
+      if (String(config.url).startsWith('https://publisher.example')) await publisherGate;
+      return { status: 200, headers: {}, data: '<html />' };
+    });
+    const validate = async (url: string) => ({
+      url,
+      hostname: new URL(url).hostname,
+      addresses: [{ address: '93.184.216.34', family: 4 as const }]
+    });
+    const publisherClient = new PublicHttpClient({ purpose: 'publisher_discovery', sourceScheduler: scheduler, client: { request }, validateUrl: validate });
+    const scholarClient = new PublicHttpClient({ purpose: 'scholar_search', sourceScheduler: scheduler, client: { request }, validateUrl: validate });
+    const service = new RetrievalService({
+      directProvider: new DirectHttpProvider({ publicHttpClient: publisherClient, publicHttpClients: { scholar_search: scholarClient } }),
+      configuration: parseRetrievalConfiguration({} as NodeJS.ProcessEnv),
+      costPolicy: new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: false }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validate }),
+      maxConcurrency: 1,
+      operationTimeoutMs: 100_000,
+      now: () => now
+    });
+
+    try {
+      const publisher = service.retrieve({ url: 'https://publisher.example/article', purpose: 'publisher_discovery', strategy: 'direct', documentFormat: 'html' });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const controller = new AbortController();
+      const scholar = service.retrieve({ url: 'https://scholar.google.com/scholar?q=cancel', purpose: 'scholar_search', strategy: 'direct', documentFormat: 'html', signal: controller.signal });
+      controller.abort();
+      await expect(scholar).rejects.toMatchObject({ code: 'cancelled' });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(scheduler.getState('https://scholar.google.com').lastStart).toBeUndefined();
+      releasePublisher();
+      await expect(publisher).resolves.toBeDefined();
+    } finally {
+      scheduler.reset();
+      jest.useRealTimers();
+    }
   });
 
   it('enforces an expired operation deadline without dispatch', async () => {

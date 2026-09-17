@@ -2,6 +2,9 @@ import { withTimeout } from '../utils/SecurityUtils.js';
 import { disposeResponseBody, getHeaderValue, validatePublicHttpUrl, type PublicUrlValidation } from '../utils/PublicNetwork.js';
 import { OutboundSecurityError, OutboundSecurityPolicy } from '../retrieval/OutboundSecurityPolicy.js';
 import { PublicHttpClient, type PublicHttpRequester } from './PublicHttpClient.js';
+import type { RetrievalDispatchObserver, RetrievalDispatchSlot } from '../retrieval/types.js';
+import { SourceDispatchDeadlineError } from './PublicSourceDispatchScheduler.js';
+import { abortForRetrievalScope, relayAbortReason } from '../retrieval/abortDiagnostics.js';
 
 export const PDF_PROBE_TIMEOUT_MS = 10_000;
 export const MAX_PDF_PROBE_BYTES = 64 * 1024;
@@ -20,14 +23,18 @@ export interface PdfAccessVerifierOptions {
   publicHttpRequester?: PublicHttpRequester;
   validateUrl?: (url: string) => Promise<PublicUrlValidation>;
   timeoutMs?: number;
+  /** Shared clock for deterministic callers; defaults to Date.now. */
+  now?: () => number;
 }
 
 /** Performs only a bounded direct prefix probe; it never writes or downloads a PDF. */
 export class PdfAccessVerifier {
   private readonly publicHttpClient: PublicHttpClient;
   private readonly timeoutMs: number;
+  private readonly now: () => number;
 
   constructor(options: PdfAccessVerifierOptions = {}) {
+    this.now = options.now || Date.now;
     this.timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs || 0) > 0
       ? Math.min(options.timeoutMs as number, PDF_PROBE_TIMEOUT_MS)
       : PDF_PROBE_TIMEOUT_MS;
@@ -40,12 +47,22 @@ export class PdfAccessVerifier {
     });
   }
 
-  async verify(url: string, parentSignal?: AbortSignal): Promise<PdfVerificationResult> {
+  async verify(
+    url: string,
+    parentSignal?: AbortSignal,
+    dispatchObserver?: RetrievalDispatchObserver,
+    deadlineAt?: number,
+    dispatchSlot?: RetrievalDispatchSlot
+  ): Promise<PdfVerificationResult> {
+    const effectiveTimeoutMs = deadlineAt === undefined
+      ? this.timeoutMs
+      : Math.min(this.timeoutMs, deadlineAt - this.now());
+    if (effectiveTimeoutMs <= 0) return { status: 'inconclusive', reason: 'aborted_or_timeout' };
     const controller = new AbortController();
-    const onAbort = () => controller.abort();
+    const onAbort = () => relayAbortReason(controller, parentSignal!);
     let fetched: Awaited<ReturnType<PublicHttpClient['request']>> | undefined;
     let settled = false;
-    if (parentSignal?.aborted) controller.abort();
+    if (parentSignal?.aborted) relayAbortReason(controller, parentSignal);
     else parentSignal?.addEventListener('abort', onAbort, { once: true });
 
     try {
@@ -54,11 +71,21 @@ export class PdfAccessVerifier {
           method: 'GET',
           headers: { Range: `bytes=0-${MAX_PDF_PROBE_BYTES - 1}` },
           responseType: 'stream',
-          timeout: this.timeoutMs,
-          signal: controller.signal
+          consumeStreamBodyWithinDispatchSlot: true,
+          maxBodyBytes: MAX_PDF_PROBE_BYTES,
+          truncateStreamBodyAtLimit: true,
+          streamBodyConsumer: (body, signal) => readBoundedPrefix(body, signal || controller.signal),
+          timeout: effectiveTimeoutMs,
+          signal: controller.signal,
+          deadlineAt,
+          dispatchObserver,
+          ...(dispatchSlot ? { dispatchSlot } : {}),
+          holdSourceLease: true
         }).then(response => {
-          if (settled || controller.signal.aborted) disposeUnknownResponseBody(response.response.data);
-          else fetched = response;
+          if (settled || controller.signal.aborted) {
+            disposeUnknownResponseBody(response.response.data);
+            response.release?.();
+          } else fetched = response;
           return response;
         });
         fetched = await responsePromise;
@@ -78,17 +105,19 @@ export class PdfAccessVerifier {
       })();
       return await withTimeout(
         probe,
-        this.timeoutMs,
+        effectiveTimeoutMs,
         'PDF verification timed out',
-        () => controller.abort()
+        () => abortForRetrievalScope(controller)
       );
     } catch (error) {
       if (parentSignal?.aborted || controller.signal.aborted) return { status: 'inconclusive', reason: 'aborted_or_timeout' };
       if (error instanceof OutboundSecurityError) return { status: 'failed', reason: 'restricted_target' };
+      if (error instanceof SourceDispatchDeadlineError) return { status: 'inconclusive', reason: 'aborted_or_timeout' };
       return { status: 'failed', reason: 'pdf_probe_failed' };
     } finally {
       settled = true;
       disposeUnknownResponseBody(fetched?.response.data);
+      fetched?.release?.();
       parentSignal?.removeEventListener('abort', onAbort);
       controller.abort();
     }
@@ -96,11 +125,22 @@ export class PdfAccessVerifier {
 }
 
 async function readBoundedPrefix(body: unknown, signal: AbortSignal): Promise<Buffer> {
-  if (signal.aborted) throw new Error('PDF probe aborted');
+  if (signal.aborted) {
+    disposeUnknownResponseBody(body);
+    throw new Error('PDF probe aborted');
+  }
   if (body === undefined || body === null) return Buffer.alloc(0);
   if (typeof body === 'string') return boundedStringPrefix(body);
-  if (Buffer.isBuffer(body)) return Buffer.from(body.subarray(0, MAX_PDF_PROBE_BYTES));
-  if (body instanceof Uint8Array) return Buffer.from(body.subarray(0, MAX_PDF_PROBE_BYTES));
+  if (Buffer.isBuffer(body)) {
+    const prefix = Buffer.from(body.subarray(0, MAX_PDF_PROBE_BYTES));
+    disposeResponseBody(body);
+    return prefix;
+  }
+  if (body instanceof Uint8Array) {
+    const prefix = Buffer.from(body.subarray(0, MAX_PDF_PROBE_BYTES));
+    disposeResponseBody(body);
+    return prefix;
+  }
   if (isAsyncIterable(body)) {
     const chunks: Buffer[] = [];
     let total = 0;

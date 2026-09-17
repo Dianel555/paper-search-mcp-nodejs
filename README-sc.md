@@ -3,11 +3,27 @@
 ##  中文|[English](README.md)
 一个基于Node.js的模型上下文协议(MCP)服务器，用于搜索和下载多个学术数据库的论文，包括arXiv、Web of Science、PubMed、Google Scholar、Sci-Hub、ScienceDirect、Springer、Wiley、Scopus、Crossref等**14个学术平台**。
 
-![Node.js](https://img.shields.io/badge/node.js->=18.0.0-green.svg)
+![Node.js](https://img.shields.io/badge/node.js-20.18.1%2B%20%2F%2022%2B-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)
+
+## 💖 赞助商
+
+<p>
+  <a href="https://scrapingant.com/">
+    <img src="assets/scrapingant.png" alt="ScrapingAnt" width="60" height="60">
+  </a>
+</p>
+
+<a href="https://scrapingant.com/">
+  <img src="assets/scrapingant-banner.png" alt="ScrapingAnt web scraping service" width="640">
+</a>
+
+本项目由 [ScrapingAnt](https://scrapingant.com/) 赞助，为访问公开网页数据提供网页抓取服务。
+
+**项目用户优惠：** 使用优惠码 `ENTHUSIAST_50`，可享受 Enthusiast 套餐**首月五折**。该优惠仅适用于首月。
 
 ## ✨ 核心特性
 
@@ -56,7 +72,7 @@
 
 ### 系统要求
 
-- Node.js >= 18.0.0
+- Node.js 20.18.1+（Node.js 21 受依赖包 engine 约束不支持）
 - npm 或 yarn
 
 ### 安装
@@ -99,18 +115,21 @@ cp .env.example .env
    # 每日 Full Record 条数；0 表示本地配额不限。
    WOS_EXPANDED_FULL_RECORD_BUDGET=0
    WOS_EXPANDED_BASE_URL=https://api.clarivate.com/api/wos
-
-   # 可选的公共页面 HTML 抓取；不会代理 WoS
-   # 仅有 key 不会授权付费检索；browser 后备必须显式开启。
-   # 拒绝 residential；默认每操作 50 credits、每请求 10 credits。
+   
+   # 可选的公共页面 HTML 后备；不会代理 WoS/API
+   # 仅有 key 不会授权付费请求；browser 和 residential 后备分别显式授权。
+   # 未授权 residential 时 Publisher/Scholar 默认为每操作 50、每请求 10 credits。
+   # SCRAPINGANT_ALLOW_RESIDENTIAL=true 后默认为 500/125；显式有效限制优先，
+   # 但 residential 请求仍必须满足 residential 上限。
    SCRAPINGANT_API_KEY=
    SCRAPINGANT_ENABLED=false
    SCRAPINGANT_ALLOW_BROWSER_ESCALATION=false
+   SCRAPINGANT_ALLOW_RESIDENTIAL=false
    SCRAPINGANT_MAX_CREDITS_PER_OPERATION=50
    SCRAPINGANT_MAX_CREDITS_PER_REQUEST=10
    SCRAPINGANT_MAX_CONCURRENCY=1
    SCRAPINGANT_PROXY_TYPE=datacenter
-
+   
    # 受控 Sci-Hub 适配器；除非显式开启，否则关闭
    SCIHUB_ENABLED=false
    SCIHUB_FETCH_MODE=fallback
@@ -168,8 +187,22 @@ npm run dev
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-#### 完整 NPX 配置（推荐）
-下面是完整的 MCP 配置示例。`env` 中的值必须都是字符串；未启用的平台可以保留空值。请替换所有占位符为你自己的环境变量，不要将真实密钥提交到仓库。
+#### 最简 NPX 配置（建议从这里开始）
+使用下面的最简配置即可立即通过 Crossref、arXiv 等公开来源开始使用。不需要 API 密钥或可选环境变量；只有在需要特定平台时再添加对应密钥。
+
+```json
+{
+  "mcpServers": {
+    "paper-search-nodejs": {
+      "command": "npx",
+      "args": ["-y", "paper-search-mcp-nodejs"]
+    }
+  }
+}
+```
+
+#### 完整 NPX 配置（高级/可选）
+只有在需要带密钥的平台、可选后备或自定义限制时才使用下面的完整配置。`env` 中的值必须都是字符串；请替换所有占位符为你自己的环境变量，不要将真实密钥提交到仓库。
 
 ```json
 {
@@ -199,11 +232,12 @@ npm run dev
         "SCRAPINGANT_API_KEY": "",
         "SCRAPINGANT_ENABLED": "false",
         "SCRAPINGANT_ALLOW_BROWSER_ESCALATION": "false",
+        "SCRAPINGANT_ALLOW_RESIDENTIAL": "false",
         "SCRAPINGANT_MAX_CREDITS_PER_OPERATION": "50",
         "SCRAPINGANT_MAX_CREDITS_PER_REQUEST": "10",
         "SCRAPINGANT_MAX_CONCURRENCY": "1",
         "SCRAPINGANT_PROXY_TYPE": "datacenter",
-        "SCHOLAR_PROXY": "http://user:password@proxy.example:8080",
+        "SCHOLAR_PROXY": "",
         "SCIHUB_ENABLED": "false",
         "SCIHUB_FETCH_MODE": "fallback",
         "SCIHUB_MIRRORS": "",
@@ -218,7 +252,7 @@ npm run dev
 }
 ```
 
-请将 `SCHOLAR_PROXY` 占位符替换为已授权的代理；如果进程已经继承 `HTTPS_PROXY`/`HTTP_PROXY`，则删除该配置项。`WOS_EXPANDED_API_KEY`、`SCRAPINGANT_API_KEY` 及其他可选密钥可以保持为空。
+`SCHOLAR_PROXY` 是 Scholar 直连传输的可选显式覆盖项。为空时，Scholar 在已配置的情况下使用运行环境中的标准本地代理别名（`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`，含小写形式）；设置后它优先于这些别名，并按完整的 HTTP(S)/SOCKS 代理 URL 解析。它不会选择 ScrapingAnt 付费后备。检索 benchmark 不会启用或替换它。`WOS_EXPANDED_API_KEY`、`SCRAPINGANT_API_KEY` 及其他可选密钥可以保持为空。
 
 #### 本地安装配置
 本地构建时保留上方完整的 `env` 对象，只需替换服务器命令：
@@ -450,6 +484,8 @@ search_scopus({
 })
 ```
 
+Scopus 搜索默认请求 `COMPLETE`。如果 Elsevier 明确返回当前 API key 没有 `COMPLETE` view 权限，程序会有界地进入一次 `STANDARD` 后备策略；其中的临时错误重试仍遵循现有重试策略。该后备不携带 `field` 覆盖项，以便 API 返回标准字段。其他认证、查询、限流、网络或服务端错误不会被转换为 view 回退。`STANDARD` 可能不包含完整作者、摘要、关键词、机构和资助等扩展元数据；使用 Scopus 仍然需要有效的 API 密钥。各 view 支持的字段请参阅 [Scopus Search API views](https://dev.elsevier.com/sc_search_views.html)。
+
 ### `check_scihub_mirrors`
 检查Sci-Hub镜像站点健康状态
 
@@ -491,11 +527,41 @@ discover_paper_access({
 ```
 
 ### `get_platform_status`
-检查平台状态和API密钥
+检查本地平台能力和 API 密钥状态。这是本地诊断，不会验证 ScrapingAnt 账户余额，也不会发起付费请求。
 
 ```typescript
 get_platform_status({})
 ```
+
+### 公共访问与成本边界
+
+`discover_paper_access` 只接受 DOI，返回 `oa_candidate`、`pdf_verified`、`not_found`、`restricted`、`failed` 或 `skipped` 等有界状态；候选链接不代表开放许可或完整下载成功。`verifyPdf` 为显式选择项，只读取有界的 PDF 前缀。候选顺序、来源 provenance、HTTP/API 状态、后备尝试和已知本地成本是彼此独立的证据字段。
+
+付费检索始终 Direct-first 且有界。空页面/解析失败可以在获得明确授权后消耗后备尝试；已知权限限制、不安全目标、资源限制、取消、截止时间、未知价格或已关闭 ledger 都会停止付费工作。已发送请求的账单缺失/无效只记录为 unknown 并消费本地估算，不单独停止仍受预算约束的 retry/fallback；对账前报告费用保持未知。显式允许 browser 时，Scholar 生产先发送一次 ScrapingAnt `browser:datacenter` 后备请求；browser 不重试。诊断不会返回 Cookie、Authorization、查询词、原始 HTML 或敏感 URL。Scholar 会话 Cookie 只保留在内存中的 Scholar HTTPS 同源会话，不会发送给 ScrapingAnt。
+
+只有获得部署授权后才设置 `SCRAPINGANT_ENABLED=true`。Scholar 的 browser-first 后备需要 `SCRAPINGANT_ALLOW_BROWSER_ESCALATION=true`；`SCRAPINGANT_ALLOW_BROWSER_ESCALATION` 与 `SCRAPINGANT_ALLOW_RESIDENTIAL` 相互独立。关闭任一开关并重启会回滚对应组合，但不会抹除已经记录的本地成本；不会同步供应商余额，也不会清除正在运行的 ledger。
+
+### 离线 benchmark
+
+固定 corpus 与策略计划可在无网络下校验；完整 360-cell live 指标属于另行授权的外部 qualification，不是每次工程修复的完成门：
+
+```bash
+# 账务/报告模拟（不运行生产检索 workflow）
+npm run --silent benchmark:offline -- --json
+# 在固定 raw fixture 下运行经过审查的离线生产 workflow（虚拟时钟）
+npm run --silent benchmark:offline -- --workflow --json
+# 可选：写入经过编码的 run-id .json/.md artifact，且不会覆盖已有文件。
+npm run --silent benchmark:offline -- --workflow --output-dir ./benchmark-artifacts
+```
+
+默认命令通过仅响应的离线 accounting simulator 校验冻结的 20 个 DOI、10 个 Scholar 查询和确定性的 360-cell 计划。加上 `--workflow` 后，命令改为运行经过审查的 `createProductionBenchmarkCellExecutor`：在独立固定 raw fixture 下调用真实 Publisher/Scholar 业务入口、provider、解析、会话、后备、调度、计费桥和 PDF 前缀路径；使用虚拟时钟，但保留生产节流规则。两种模式都明确是 offline-only，不会初始化线上 provider 或使用凭据，也不能产生 `live_passed`；workflow 报告必须与 simulator 的统计分开识别。线上评估使用独立的 live 命令，不会恢复旧 run 或隐式消耗 credits。计划包含 60 个生产 cell 与 300 个独立对照 cell；未执行的线上 cell 保持 `not_run` 并保留在分母中。artifact 路径采用独占创建，不会静默覆盖旧 run。
+
+```bash
+# 已完成评审并获得明确授权后，运行一次有界 live campaign。
+npm run --silent benchmark:live -- --authorize-live --authorize-scholar-proxy --run-id live-YYYYMMDD-01 --output-dir ./live-benchmark-artifacts --json
+```
+
+live 命令要求冻结 corpus、完整的 paid/browser/residential 配置、公开目标 preflight 和固定安全上限（15,000 credits、1,500 HTTP dispatches、7,200,000ms）。preflight 失败会生成 privacy-safe 的 `blocked` 报告且零 dispatch，不会缩小固定矩阵、追加预算或绕过配置；对照 cell 仍是单一 strategy、无 retry/fallback，Publisher 对照不探测 PDF。不要将 `--authorize-live` 当作供应商余额或 capability 授权；显式 `SCHOLAR_PROXY` 端点完成独立 TLS/所有权审查后，才可额外传入 `--authorize-scholar-proxy`，仅有 ambient 代理别名仍会被阻断。
 
 ## 📊 数据模型
 
@@ -689,23 +755,6 @@ search_webofscience({
 })
 ```
 
-**🔧 v0.3.0 改进:**
-
-- ✅ **Google Scholar**: 隔离的同源会话与 HTML 解析 — 代理优先直连（`SCHOLAR_PROXY`/标准 proxy 环境变量），仅在传输失败或上游 5xx 时使用 ScrapingAnt General 兜底，不绕过 403/429/captcha
-- ✅ **arXiv**: 修复搜索查询前缀（`all:`），符合arXiv API规范
-- ✅ **Google Scholar**: 更新User-Agent到最新浏览器版本（Chrome 131, Firefox 133, Edge 131）
-- ✅ **性能优化**: 实现了 `RequestCache` 缓存搜索结果和API响应
-- ✅ **可靠性**: 添加了 `RateLimiter` 和 `QuotaManager` 防止API滥用和429错误
-- ✅ **新功能**: 添加了 `CitationService` 和 `PDFExtractor` 用于未来增强
-- ✅ **测试**: 将测试套件重组为 `tests/platforms`, `tests/utils`, 和 `tests/integration`
-- ✅ **WoS契约**：分离 Starter v1/v2 与 Expanded SR/FR/引用关系的请求和响应处理
-- ✅ **配额安全**：每次尝试限流、并发预留、Full Record预算及配额响应头状态
-- ✅ **公共访问发现**：校验 DOI 重定向并可选使用 ScrapingAnt 发现出版社公共页面
-- ✅ **共享服务**：解析和 WoS 请求机制移到平台门面之外的 services/utils
-- ✅ **18个字段标签**: 完整支持所有WoS Starter API字段标签
-- ✅ **增强过滤**: ISSN、卷号、页码、期号、文档类型、PMID过滤器
-- ✅ **查询验证**: 查询复杂度和注入防护的安全检查
-
 **支持的搜索选项:**
 - `query`: 搜索词 (支持多主题)
 - `year`: 单个年份"2023"或范围"2020-2023"
@@ -766,7 +815,7 @@ export NODE_ENV=development
 
 ### ScrapingAnt 公共抓取层
 
-ScrapingAnt 是可选的付费公共页面后备：仅配置 key 不会发起付费请求，必须设置 `SCRAPINGANT_ENABLED=true`；browser 后备只有在获得明确授权并设置 `SCRAPINGANT_ALLOW_BROWSER_ESCALATION=true` 后才开启。默认本地预算为每操作 50 credits、每请求 10 credits，只接受 `datacenter`，拒绝 residential。Google Scholar 使用 `/v2/general`，WoS DOI 发现和 Sci-Hub 后备使用 `/v2/extended`；绝不代理 Clarivate/WoS API。DOI 发现会在本地可见的重定向链中先拒绝已知登录、SSO 和 Clarivate 目标。本地 DNS 校验无法证明远程代理自己的重定向目标安全，因此发现到的链接不是 OA、授权或版权结论；真实 credits 以响应头为准，本地预算不等于供应商账单余额。
+ScrapingAnt 是可选的付费公共页面后备：仅配置 key 不会发起付费请求，必须设置 `SCRAPINGANT_ENABLED=true`；browser 和 residential 后备分别显式授权。当前 Scholar 的 `browser:datacenter` 优先顺序仍是待真实能力验证的临时策略，不代表供应商可用性；未启用 browser 时保持 static-first。未授权 residential 时 Publisher/Scholar 默认为每操作 50、每请求 10 credits；设置 `SCRAPINGANT_ALLOW_RESIDENTIAL=true` 后默认为 500/125。显式有效限制优先，但 residential dispatch 仍必须设置 `SCRAPINGANT_PROXY_TYPE=residential`，datacenter 上限不会发送 residential 流量。Google Scholar 使用通用 `/v2/general` HTML 接口而非专用 Scholar API，WoS DOI 发现和 Sci-Hub 后备使用 `/v2/extended`；绝不代理 Clarivate/WoS API。ScrapingAnt Proxy mode 不作为透明替代方案；`SCRAPINGANT_PROXY_TYPE` 只是 provider 的代理上限，`SCHOLAR_PROXY` 是独立的 Scholar 直连显式覆盖。DOI 发现会在本地可见的重定向链中先拒绝已知登录、SSO 和 Clarivate 目标。本地 DNS 校验无法证明远程代理自己的重定向目标安全，因此发现到的链接不是 OA、授权或版权结论；真实 credits 以响应头为准，本地预算不等于供应商账单余额。已知权限、安全、资源、取消或截止时间错误不会触发付费后备，已发送请求的费用缺失只记录为 unknown 并消费本地估算，不单独停止有界后备；完成的策略 scope 只保留有限缓存元数据，不保留原始 provider 文档。持续性的 Scholar 封锁仍属于供应商能力边界。
 
 ## 🔑 API密钥需求
 
@@ -788,7 +837,7 @@ MIT License - 查看 [LICENSE](LICENSE) 文件了解详情。
 
 ## 🤝 贡献
 
-欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解如何参与。
+欢迎贡献！
 
 1. Fork项目
 2. 创建特性分支 (`git checkout -b feature/amazing-feature`)

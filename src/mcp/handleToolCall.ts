@@ -6,7 +6,7 @@ import { PaperSource, type SearchOptions } from '../platforms/PaperSource.js';
 import { CitationService } from '../services/CitationService.js';
 import { sanitizeBody, sanitizeDownloadPath, sanitizeDoi, sanitizeSensitiveText } from '../utils/SecurityUtils.js';
 import { logDebug } from '../utils/Logger.js';
-import type { RetrievalOperationContext } from '../retrieval/types.js';
+import type { RetrievalOperationContext, RetrievalPurpose } from '../retrieval/types.js';
 
 const citationService = new CitationService();
 
@@ -99,23 +99,50 @@ export async function handleToolCall(
   searchers: Searchers,
   operationContext?: RetrievalOperationContext
 ) {
-  const ownedOperation = operationContext ? undefined : searchers.retrievalService?.createOperation();
+  const toolName = toolNameRaw as ToolName;
+  // Validate and normalize business arguments before creating an operation.
+  // Invalid input must not even allocate a retrieval budget or deadline.
+  const args = parseToolArgs(toolName, rawArgs);
+  const ownedOperation = operationContext ? undefined : searchers.retrievalService?.createOperation({
+    purpose: retrievalPurposeForToolCall(toolName, args)
+  });
   const operation = operationContext || ownedOperation;
   try {
-    return await handleToolCallWithContext(toolNameRaw, rawArgs, searchers, operation);
+    return await handleToolCallWithContext(toolName, args, searchers, operation);
   } finally {
     ownedOperation?.dispose?.();
   }
 }
 
+export function retrievalPurposeForToolCall(toolName: ToolName, args: any): RetrievalPurpose | undefined {
+  switch (toolName) {
+    case 'search_google_scholar':
+      return 'scholar_search';
+    case 'discover_paper_access':
+      return 'publisher_discovery';
+    case 'search_webofscience':
+      return args?.discoverAccess === true ? 'publisher_discovery' : undefined;
+    case 'search_papers':
+      if (args?.platform === 'googlescholar' || args?.platform === 'scholar') return 'scholar_search';
+      if (args?.platform === 'scihub') return 'scihub_lookup';
+      return undefined;
+    case 'search_scihub':
+    case 'download_paper':
+      return args?.platform === undefined || args?.platform === 'scihub' ? 'scihub_lookup' : undefined;
+    case 'get_paper_by_doi':
+      return args?.platform === 'scihub' ? 'scihub_lookup' : undefined;
+    default:
+      return undefined;
+  }
+}
+
 async function handleToolCallWithContext(
   toolNameRaw: string,
-  rawArgs: unknown,
+  args: any,
   searchers: Searchers,
   operation?: RetrievalOperationContext
 ) {
   const toolName = toolNameRaw as ToolName;
-  const args = parseToolArgs(toolName, rawArgs);
 
   switch (toolName) {
     case 'search_papers': {

@@ -1,5 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { PdfAccessVerifier, MAX_PDF_PROBE_BYTES } from '../../src/services/PdfAccessVerifier.js';
+import { PublicHttpClient } from '../../src/services/PublicHttpClient.js';
+import { createConcurrencyLimiter } from '../../src/utils/ConcurrencyLimiter.js';
 import type { PublicHttpResponseData } from '../../src/services/PublicHttpClient.js';
 
 const validUrl = async (url: string) => ({
@@ -28,6 +30,53 @@ async function* chunks(values: Uint8Array[]): AsyncIterable<Uint8Array> {
 }
 
 describe('PdfAccessVerifier', () => {
+  it('keeps the real transport slot through a stalled PDF body', async () => {
+    let releaseBody!: () => void;
+    const bodyFinished = new Promise<void>(resolve => { releaseBody = resolve; });
+    const stalledBody = {
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('%PDF-1.7', 'utf8');
+        await bodyFinished;
+      }
+    };
+    const request = (jest.fn() as any)
+      .mockResolvedValueOnce({ status: 200, headers: { 'content-type': 'application/pdf' }, data: stalledBody })
+      .mockResolvedValueOnce({ status: 200, headers: { 'content-type': 'application/pdf' }, data: Buffer.from('%PDF-2.0', 'utf8') });
+    const publicHttpClient = new PublicHttpClient({ client: { request }, validateUrl: validUrl });
+    const verifier = new PdfAccessVerifier({ publicHttpClient, timeoutMs: 5_000 });
+    const dispatchSlot = createConcurrencyLimiter(1);
+    const first = verifier.verify('https://publisher.example/one.pdf', undefined, undefined, Date.now() + 5_000, dispatchSlot);
+    await expect(first).resolves.toEqual(expect.objectContaining({ status: 'verified' }));
+    expect(request).toHaveBeenCalledTimes(1);
+    const second = verifier.verify('https://other-publisher.example/two.pdf', undefined, undefined, Date.now() + 5_000, dispatchSlot);
+    await expect(second).resolves.toEqual(expect.objectContaining({ status: 'verified' }));
+    expect(request).toHaveBeenCalledTimes(2);
+    releaseBody();
+  });
+
+  it('releases a real limiter slot when cancellation cannot close the body iterator', async () => {
+    const never: Promise<IteratorResult<Uint8Array>> = new Promise(() => undefined);
+    const stalledBody = {
+      next: () => never,
+      return: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+      [Symbol.asyncIterator]() { return this; }
+    };
+    const request = (jest.fn() as any)
+      .mockResolvedValueOnce({ status: 200, headers: { 'content-type': 'application/pdf' }, data: stalledBody })
+      .mockResolvedValueOnce({ status: 200, headers: { 'content-type': 'application/pdf' }, data: Buffer.from('%PDF-2.0', 'utf8') });
+    const publicHttpClient = new PublicHttpClient({ client: { request }, validateUrl: validUrl });
+    const verifier = new PdfAccessVerifier({ publicHttpClient, timeoutMs: 5_000 });
+    const dispatchSlot = createConcurrencyLimiter(1);
+    const controller = new AbortController();
+    const first = verifier.verify('https://cancel-one.example/one.pdf', controller.signal, undefined, Date.now() + 5_000, dispatchSlot);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    controller.abort();
+    await expect(first).resolves.toEqual(expect.objectContaining({ status: 'inconclusive', reason: 'aborted_or_timeout' }));
+    await expect(verifier.verify('https://cancel-two.example/two.pdf', undefined, undefined, Date.now() + 5_000, dispatchSlot))
+      .resolves.toEqual(expect.objectContaining({ status: 'verified' }));
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ['200', 200],
     ['206', 206]

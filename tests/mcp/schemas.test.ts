@@ -100,6 +100,11 @@ describe('parseToolArgs', () => {
       const args = parseToolArgs('get_paper_by_doi', { doi: '10.1038/nature12373' });
       expect(args.platform).toBe('all');
     });
+
+    it('accepts the existing Sci-Hub DOI route', () => {
+      const args = parseToolArgs('get_paper_by_doi', { doi: '10.1038/nature12373', platform: 'scihub' });
+      expect(args.platform).toBe('scihub');
+    });
   });
 
   describe('discover_paper_access', () => {

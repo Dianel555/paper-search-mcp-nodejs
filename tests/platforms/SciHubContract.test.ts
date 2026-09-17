@@ -410,6 +410,7 @@ describe('SciHub controlled adapter', () => {
       const pending = searcher.search('10.1000/late-compatibility', { operationContext: operation });
       await scraperEntered;
       operation.dispose();
+      expect(operation.signal.aborted).toBe(true);
       await expect(pending).resolves.toEqual([]);
 
       resolveScraper({ status: 200, headers: { 'Ant-credits-cost': '1' }, data: { html: '<html />' } });
@@ -419,8 +420,9 @@ describe('SciHub controlled adapter', () => {
         reportedCredits: 1,
         reportedCreditsKnown: true,
         unknownCostAttempts: 0,
-        paidClosed: true
+        paidClosed: false
       }));
+      expect(scraperRequest).toHaveBeenCalledTimes(1);
     } finally {
       operation.dispose();
     }
@@ -449,7 +451,7 @@ describe('SciHub controlled adapter', () => {
     });
 
     await expect(searcher.search('10.1000/api-error')).resolves.toEqual([]);
-    expect(scraperRequest).toHaveBeenCalledTimes(1);
+    expect(scraperRequest).toHaveBeenCalledTimes(3);
     expect(scraperRequest.mock.calls.every((call: any[]) => call[0].params.browser === false)).toBe(true);
   });
 
@@ -1295,7 +1297,7 @@ describe('SciHub controlled adapter', () => {
         savePath: directory,
         operationContext: operation
       })).resolves.toBe(path.join(directory, '10.1000_context.pdf'));
-      expect(strategies).toEqual(['direct', 'static', 'direct', 'static']);
+      expect(strategies).toEqual(['direct', 'static']);
       expect(new Set(contexts)).toEqual(new Set([operation]));
       expect(download).toHaveBeenCalledWith('https://cdn.example/paper.pdf', expect.objectContaining({
         signal: operation.signal

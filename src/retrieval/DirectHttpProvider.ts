@@ -12,6 +12,8 @@ import {
 } from './types.js';
 import { PublicHttpClient, type PublicHttpResponse } from '../services/PublicHttpClient.js';
 import { OutboundSecurityError, SensitiveOutboundTargetError } from './OutboundSecurityPolicy.js';
+import { SourceCooldownError, SourceDispatchDeadlineError } from '../services/PublicSourceDispatchScheduler.js';
+import { relayAbortReason, retrievalFailureKindForAbort } from './abortDiagnostics.js';
 
 export const MAX_RETRIEVAL_RESPONSE_BYTES = 5 * 1024 * 1024;
 
@@ -34,7 +36,11 @@ export class DirectHttpProvider implements RetrievalProvider {
     iframeDocuments: false,
     pdfCandidates: false,
     browser: false,
-    paid: false
+    paid: false,
+    proxyTypes: ['datacenter'],
+    combinations: ['direct:datacenter'],
+    dispatchObservation: true,
+    transportSlotManagement: true
   } as const;
 
   private readonly publicHttpClient: DirectHttpClient;
@@ -59,10 +65,11 @@ export class DirectHttpProvider implements RetrievalProvider {
 
     const remainingMs = context.remainingMs();
     if (remainingMs <= 0) {
-      throw new RetrievalError({ code: 'timeout', message: 'Retrieval operation timed out', provider: this.name });
+      throw new RetrievalError({ code: 'timeout', message: 'Retrieval operation timed out', provider: this.name, failureKind: 'operation_deadline' });
     }
 
     let response: PublicHttpResponse<unknown> | undefined;
+    let responseBodyStarted = false;
     const linkedSignal = linkAbortSignals(context.signal, request.signal);
     const publicHttpClient = this.publicHttpClients[request.purpose] || this.publicHttpClient;
     try {
@@ -72,10 +79,20 @@ export class DirectHttpProvider implements RetrievalProvider {
         ...(request.query ? { params: request.query } : {}),
         responseType: 'stream',
         timeout: Math.min(TIMEOUTS.DEFAULT, remainingMs),
-        signal: linkedSignal.signal
-      } as AxiosRequestConfig);
+        deadlineAt: context.deadlineAt,
+        signal: linkedSignal.signal,
+        holdSourceLease: true,
+        ...(request.dispatchObserver ? { dispatchObserver: request.dispatchObserver } : {}),
+        ...(context.withDispatchSlot ? { dispatchSlot: context.withDispatchSlot } : {})
+      } as AxiosRequestConfig & { dispatchObserver?: unknown; dispatchSlot?: unknown });
       throwIfAborted(context, linkedSignal.signal);
-      const html = await readBoundedText(response.response.data, this.maxResponseBytes, context, linkedSignal.signal);
+      const readBody = () => {
+        responseBodyStarted = true;
+        return readBoundedText(response!.response.data, this.maxResponseBytes, context, linkedSignal.signal);
+      };
+      const html = context.withDispatchSlot
+        ? await context.withDispatchSlot(readBody, linkedSignal.signal)
+        : await readBody();
       const targetStatus = Number(response.response.status);
       const document: FiniteDocument = {
         kind: 'html',
@@ -98,18 +115,45 @@ export class DirectHttpProvider implements RetrievalProvider {
       };
     } catch (error) {
       if (error instanceof RetrievalError) throw error;
+      if (error instanceof SourceDispatchDeadlineError) {
+        throw new RetrievalError({ code: 'timeout', message: 'Direct retrieval timed out', provider: this.name, failureKind: 'operation_deadline' });
+      }
+      if (error instanceof SourceCooldownError) {
+        throw new RetrievalError({ code: 'target_unavailable', message: 'Public source is cooling down', provider: this.name, targetStatus: 429 });
+      }
       if (error instanceof OutboundSecurityError || error instanceof SensitiveOutboundTargetError) {
         throw new RetrievalError({ code: 'security', message: 'Retrieval target was rejected by outbound security policy', provider: this.name });
       }
       if (linkedSignal.signal.aborted || isAbortError(error)) {
-        throw new RetrievalError({ code: 'cancelled', message: 'Retrieval operation was cancelled', provider: this.name });
+        throw new RetrievalError({
+          code: 'cancelled',
+          message: 'Retrieval operation was cancelled',
+          provider: this.name,
+          failureKind: retrievalFailureKindForAbort(linkedSignal.signal, context)
+        });
       }
       if (isTimeoutError(error) || context.remainingMs() <= 0) {
-        throw new RetrievalError({ code: 'timeout', message: 'Direct retrieval timed out', provider: this.name });
+        throw new RetrievalError({
+          code: 'timeout',
+          message: 'Direct retrieval timed out',
+          provider: this.name,
+          failureKind: context.remainingMs() <= 0
+            ? 'operation_deadline'
+            : responseBodyStarted ? 'response_body' : 'transport_timeout'
+        });
       }
-      throw new RetrievalError({ code: 'network', message: 'Direct retrieval failed', provider: this.name, retryable: true });
+      throw new RetrievalError({
+        code: 'network',
+        message: 'Direct retrieval failed',
+        provider: this.name,
+        retryable: true,
+        ...(responseBodyStarted ? { failureKind: 'response_body' as const } : {})
+      });
     } finally {
-      if (response) disposeUnknownResponseBody(response.response.data);
+      if (response) {
+        disposeUnknownResponseBody(response.response.data);
+        response.release?.();
+      }
       linkedSignal.dispose();
     }
   }
@@ -137,7 +181,12 @@ async function readBoundedText(
     const iterator = body[Symbol.asyncIterator]();
     try {
       while (true) {
-        const next = await waitForAbort(Promise.resolve(iterator.next()), signal, () => disposeAsyncIterator(body, iterator));
+        const next = await waitForAbort(
+          Promise.resolve(iterator.next()),
+          signal,
+          () => disposeAsyncIterator(body, iterator),
+          () => retrievalFailureKindForAbort(signal, context)
+        );
         if (next.done) break;
         throwIfAborted(context, signal);
         const chunk = next.value;
@@ -166,7 +215,8 @@ function ensureSize(size: number, maxBytes: number, body?: unknown): void {
   throw new RetrievalError({
     code: 'response_too_large',
     message: 'Retrieval response exceeds the allowed size',
-    provider: 'direct'
+    provider: 'direct',
+    failureKind: 'response_body'
   });
 }
 
@@ -198,11 +248,17 @@ function disposeUnknownResponseBody(body: unknown): void {
   }
 }
 
-function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal, onLateValue?: (value: T) => void): Promise<T> {
+function waitForAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  onLateValue?: (value: T) => void,
+  failureKind?: () => RetrievalError['failureKind']
+): Promise<T> {
   if (signal.aborted) return Promise.reject(new RetrievalError({
     code: 'cancelled',
     message: 'Retrieval operation was cancelled',
-    provider: 'direct'
+    provider: 'direct',
+    failureKind: failureKind?.() || 'cancelled'
   }));
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -215,7 +271,8 @@ function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal, onLateValue?:
       reject(new RetrievalError({
         code: 'cancelled',
         message: 'Retrieval operation was cancelled',
-        provider: 'direct'
+        provider: 'direct',
+        failureKind: failureKind?.() || 'cancelled'
       }));
     };
     signal.addEventListener('abort', onAbort, { once: true });
@@ -238,15 +295,20 @@ function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal, onLateValue?:
 
 function throwIfAborted(context: RetrievalOperationContext, signal: AbortSignal = context.signal): void {
   if (context.signal.aborted || signal.aborted) {
-    throw new RetrievalError({ code: 'cancelled', message: 'Retrieval operation was cancelled', provider: 'direct' });
+    throw new RetrievalError({
+      code: 'cancelled',
+      message: 'Retrieval operation was cancelled',
+      provider: 'direct',
+      failureKind: retrievalFailureKindForAbort(signal, context)
+    });
   }
 }
 
 function linkAbortSignals(primary: AbortSignal, secondary?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
   if (!secondary) return { signal: primary, dispose: () => undefined };
   const controller = new AbortController();
-  const relay = () => controller.abort();
-  if (primary.aborted || secondary.aborted) controller.abort();
+  const relay = () => relayAbortReason(controller, primary.aborted ? primary : secondary!);
+  if (primary.aborted || secondary.aborted) relay();
   else {
     primary.addEventListener('abort', relay, { once: true });
     secondary.addEventListener('abort', relay, { once: true });

@@ -17,7 +17,7 @@ import { PaperSource, SearchOptions, DownloadOptions, PlatformCapabilities } fro
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
 import { ErrorHandler } from '../utils/ErrorHandler.js';
-import { QuotaManager } from '../utils/QuotaManager.js';
+import { QuotaExhaustedError, QuotaManager } from '../utils/QuotaManager.js';
 import { TIMEOUTS, USER_AGENT } from '../config/constants.js';
 import { logDebug } from '../utils/Logger.js';
 
@@ -234,23 +234,14 @@ export class ScopusSearcher extends PaperSource {
         searchQuery += ` AND DOCTYPE(${docTypeMap[customOptions.documentType]})`;
       }
 
-      await this.rateLimiter.waitForPermission();
-      this.quotaManager.checkQuota('scopus');
-
-      const response = await ErrorHandler.retryWithBackoff(
-        () => this.client.get<ScopusSearchResponse>('/content/search/scopus', {
-          params: {
-            query: searchQuery,
-            count: maxResults,
-            start: 0,
-            view: 'COMPLETE',
-            field: 'dc:identifier,dc:title,dc:creator,prism:publicationName,prism:coverDate,prism:doi,prism:url,prism:volume,prism:issueIdentifier,prism:pageRange,citedby-count,dc:description,authkeywords,author,affiliation,openaccess,eid'
-          }
-        }),
-        { context: 'Scopus search' }
-      );
-
-      this.quotaManager.incrementUsage('scopus');
+      let response: Awaited<ReturnType<typeof this.searchWithView>>;
+      try {
+        response = await this.searchWithView(searchQuery, maxResults, 'COMPLETE');
+      } catch (error) {
+        if (!isCompleteViewEntitlementError(error)) throw error;
+        logDebug('Scopus COMPLETE view is unavailable; retrying once with STANDARD view');
+        response = await this.searchWithView(searchQuery, maxResults, 'STANDARD');
+      }
 
       const entries = response.data['search-results']?.entry || [];
 
@@ -265,6 +256,39 @@ export class ScopusSearcher extends PaperSource {
     } catch (error: any) {
       this.handleHttpError(error, 'search');
     }
+  }
+
+  private async searchWithView(
+    searchQuery: string,
+    maxResults: number,
+    view: ScopusSearchView
+  ) {
+    return ErrorHandler.retryWithBackoff(
+      async () => {
+        await this.rateLimiter.waitForPermission();
+        const quotaReservation = this.quotaManager.reserve('scopus', 1);
+        try {
+          return await this.client.get<ScopusSearchResponse>('/content/search/scopus', {
+            params: {
+              query: searchQuery,
+              count: maxResults,
+              start: 0,
+              // The field parameter overrides view in the Scopus API. Leave it
+              // unset so STANDARD can return only fields allowed by entitlement.
+              view
+            }
+          });
+        } finally {
+          // Scopus quota is request-based: commit even when the provider
+          // rejects the dispatch, including a failed COMPLETE attempt.
+          this.quotaManager.commit(quotaReservation);
+        }
+      },
+      {
+        context: `Scopus search (${view})`,
+        shouldRetry: error => !(error instanceof QuotaExhaustedError) && ErrorHandler.isRetryable(error)
+      }
+    );
   }
 
   private async parseEntry(entry: ScopusEntry): Promise<Paper | null> {
@@ -524,6 +548,57 @@ export class ScopusSearcher extends PaperSource {
       return null;
     }
   }
+}
+
+type ScopusSearchView = 'COMPLETE' | 'STANDARD';
+
+function isCompleteViewEntitlementError(error: unknown): boolean {
+  const errorRecord = asRecord(error);
+  const response = asRecord(errorRecord?.response);
+  const status = Number(response?.status);
+  if (status !== 401 && status !== 403) return false;
+
+  const data = response?.data;
+  const dataRecord = asRecord(data);
+  const serviceError = asRecord(dataRecord?.['service-error']);
+  const serviceStatus = asRecord(serviceError?.status);
+  const errorResponse = asRecord(dataRecord?.['error-response']);
+  const code = [
+    serviceStatus?.statusCode,
+    serviceStatus?.code,
+    errorResponse?.statusCode,
+    errorResponse?.code
+  ].filter(isString).join(' ');
+  const message = [
+    serviceStatus?.statusText,
+    serviceStatus?.message,
+    errorResponse?.statusText,
+    errorResponse?.message,
+    dataRecord?.message,
+    asRecord(dataRecord?.error)?.message,
+    dataRecord?.error,
+    errorRecord?.message
+  ].filter(isString).join(' ');
+  const text = `${code} ${message}`.trim();
+  if (!text) return false;
+
+  if (/(?:invalid|missing|expired)\s+(?:api[\s-]?key|credentials?|authentication|token)|authentication\s+failed/i.test(text)
+    || /(?:authentication_error|authentication_failed|invalid[_ -]?credentials?|invalid[_ -]?api[_ -]?key|missing[_ -]?api[_ -]?key)/i.test(code)) {
+    return false;
+  }
+
+  const denial = /(?:unauthori[sz]ed|authorization_error|forbidden|denied|insufficient|privileg|permission|entitl|not[_\s-]+(?:available|authori[sz]ed|entitled))/i.test(text);
+  const structuredEntitlementSignal = /(?:entitlement|subscription|service[_ -]?level)/i.test(code);
+  const explicitViewSignal = /(?:^|[^a-z])(?:complete|view)(?:$|[^a-z])/i.test(text);
+  return denial && (structuredEntitlementSignal || explicitViewSignal);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
 }
 
 function firstConfiguredKey(...values: Array<string | undefined>): string | undefined {

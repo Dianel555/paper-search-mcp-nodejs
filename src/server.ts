@@ -14,7 +14,7 @@ dotenv.config();
 const server = new Server(
   {
     name: 'paper-search-mcp-nodejs',
-    version: '0.3.0'
+    version: '0.3.1'
   },
   {
     capabilities: {

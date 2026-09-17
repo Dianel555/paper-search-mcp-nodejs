@@ -71,6 +71,7 @@ pids/
 tmp/
 temp/
 scratch/
+benchmark.md
 
 # Downloads and outputs
 downloads/

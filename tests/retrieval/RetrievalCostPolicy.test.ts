@@ -3,13 +3,15 @@ import { parseRetrievalCredits, RetrievalCostPolicy } from '../../src/retrieval/
 
 describe('RetrievalCostPolicy', () => {
   it('uses the finite host pricing snapshot with label-aware matching', () => {
-    const policy = new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: true });
+    const policy = new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 125, enabled: true });
 
     expect(policy.estimate('https://scholar.google.com/scholar', 'static')).toEqual({ known: true, credits: 10 });
     expect(policy.estimate('HTTPS://SCHOLAR.GOOGLE.COM./scholar', 'static')).toEqual({ known: true, credits: 10 });
     expect(policy.estimate('https://scholar.google.com/scholar', 'browser')).toEqual({ known: true, credits: 10 });
+    expect(policy.estimate('https://scholar.google.com/scholar', 'static', 'residential')).toEqual({ known: true, credits: 25 });
+    expect(policy.estimate('https://scholar.google.com/scholar', 'browser', 'residential')).toEqual({ known: true, credits: 125 });
     expect(policy.estimate('https://google.co.uk/search', 'static')).toEqual({ known: false, reason: 'pricing_unknown' });
-    expect(policy.estimate('https://google.com.example.org/search', 'static')).toEqual({ known: false, reason: 'pricing_unknown' });
+    expect(policy.estimate('https://google.com.example.org/search', 'static', 'residential')).toEqual({ known: false, reason: 'pricing_unknown' });
     expect(policy.estimate('https://www.googleapis.com/script', 'static')).toEqual({ known: false, reason: 'pricing_unknown' });
     expect(policy.estimate('https://mygoogle.example.org/page', 'static')).toEqual({ known: true, credits: 1 });
   });
@@ -31,6 +33,73 @@ describe('RetrievalCostPolicy', () => {
       paidClosed: true,
       paidClosedReason: 'pricing_unknown'
     }));
+  });
+
+  it('does not close a ledger for temporary reservation contention', () => {
+    const policy = new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true });
+    const ledger = policy.createLedger();
+    const first = ledger.reserve(6);
+
+    expect(first).not.toBeNull();
+    expect(ledger.reserve(5)).toBeNull();
+    expect(ledger.snapshot().paidClosed).toBe(false);
+
+    first?.release();
+    expect(ledger.reserve(5)).not.toBeNull();
+  });
+
+  it('closes for persistent insufficiency even when another reservation is outstanding', () => {
+    const policy = new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true });
+    const ledger = policy.createLedger();
+    for (let index = 0; index < 9; index++) {
+      const reservation = ledger.reserve(1)!;
+      expect(reservation.markDispatched()).toBe(true);
+      ledger.settle(reservation, { known: true, credits: 1 });
+    }
+    const outstanding = ledger.reserve(1)!;
+
+    expect(ledger.reserve(10)).toBeNull();
+    expect(ledger.snapshot()).toEqual(expect.objectContaining({
+      paidClosed: true,
+      paidClosedReason: 'operation_budget_exceeded',
+      reservedCredits: 1
+    }));
+    outstanding.release();
+  });
+
+  it('rechecks headroom synchronously before dispatch after another attempt settles', () => {
+    const policy = new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true });
+    const ledger = policy.createLedger();
+    const first = ledger.reserve(5)!;
+    const second = ledger.reserve(5)!;
+
+    expect(first.markDispatched()).toBe(true);
+    ledger.settle(first, { known: true, credits: 9 });
+    expect(second.markDispatched()).toBe(false);
+    expect(ledger.snapshot()).toEqual(expect.objectContaining({
+      admissionUsed: 9,
+      reservedCredits: 0,
+      paidClosed: true,
+      paidClosedReason: 'operation_budget_exceeded'
+    }));
+  });
+
+  it('rolls back a marked reservation when transport admission fails before submission', () => {
+    const policy = new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true });
+    const ledger = policy.createLedger();
+    const reservation = ledger.reserve(4)!;
+
+    expect(reservation.markDispatched()).toBe(true);
+    expect(reservation.cancelBeforeTransport?.()).toBe(true);
+    expect(ledger.snapshot()).toEqual(expect.objectContaining({
+      admissionUsed: 0,
+      reservedCredits: 0,
+      unknownCostAttempts: 0,
+      reportedCreditsKnown: true
+    }));
+    expect(reservation.cancelBeforeTransport?.()).toBe(false);
+    ledger.settle(reservation, { known: false, credits: null });
+    expect(ledger.snapshot().unknownCostAttempts).toBe(0);
   });
 
   it('atomically reserves the last budget unit per operation and isolates ledgers', () => {
@@ -88,25 +157,50 @@ describe('RetrievalCostPolicy', () => {
     }));
   });
 
-  it('treats unknown cost as consumed and permanently closes paid admission', () => {
-    const policy = new RetrievalCostPolicy({ budget: 10, enabled: true });
+  it('records unknown cost while continuing within the local admission budget', () => {
+    const policy = new RetrievalCostPolicy({ budget: 3, enabled: true });
     const ledger = policy.createLedger();
-    const reservation = ledger.admit('https://publisher.example/page', 'static')!;
-    reservation.markDispatched();
-    ledger.settle(reservation, { known: false, credits: null, reason: 'invalid_billing_header' });
+
+    for (let index = 0; index < 3; index++) {
+      const reservation = ledger.admit(`https://publisher.example/page-${index}`, 'static')!;
+      reservation.markDispatched();
+      ledger.settle(reservation, { known: false, credits: null, reason: 'invalid_billing_header' });
+    }
 
     expect(ledger.snapshot()).toEqual(expect.objectContaining({
-      admissionUsed: 1,
+      admissionUsed: 3,
       reportedCredits: 0,
       reportedCreditsKnown: false,
-      unknownCostAttempts: 1,
-      paidClosed: true,
-      paidClosedReason: 'unknown_cost'
+      unknownCostAttempts: 3,
+      paidClosed: false
     }));
-    expect(ledger.admit('https://publisher.example/next', 'static')).toBeNull();
+    expect(ledger.admit('https://publisher.example/over-budget', 'static')).toBeNull();
+    expect(ledger.snapshot()).toEqual(expect.objectContaining({
+      paidClosed: true,
+      paidClosedReason: 'operation_budget_exceeded'
+    }));
   });
 
-  it('reconciles a late known cost once without reopening or changing a prior reservation', () => {
+  it('reconciles a late known cost once without closing a bounded ledger', () => {
+    const policy = new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true });
+    const ledger = policy.createLedger();
+    const reservation = ledger.reserve(5)!;
+    reservation.markDispatched();
+    ledger.settle(reservation, { known: false, credits: null });
+    ledger.reconcile(reservation, { known: true, credits: 7 });
+    ledger.reconcile(reservation, { known: true, credits: 7 });
+
+    expect(ledger.snapshot()).toEqual(expect.objectContaining({
+      admissionUsed: 7,
+      reportedCredits: 7,
+      reportedCreditsKnown: true,
+      unknownCostAttempts: 0,
+      paidClosed: false
+    }));
+    expect(ledger.admit('https://publisher.example/next', 'static')).not.toBeNull();
+  });
+
+  it('reconciles a late known cost from an admitted unknown attempt', () => {
     const policy = new RetrievalCostPolicy({ budget: 10, maxCreditsPerRequest: 10, enabled: true });
     const ledger = policy.createLedger();
     const reservation = ledger.admit('https://publisher.example/page', 'static')!;
@@ -120,10 +214,9 @@ describe('RetrievalCostPolicy', () => {
       reportedCredits: 3,
       reportedCreditsKnown: true,
       unknownCostAttempts: 0,
-      paidClosed: true,
-      paidClosedReason: 'unknown_cost'
+      paidClosed: false
     }));
-    expect(ledger.admit('https://publisher.example/next', 'static')).toBeNull();
+    expect(ledger.admit('https://publisher.example/next', 'static')).not.toBeNull();
   });
 
   it('classifies only non-negative safe integer billing values as known', () => {
