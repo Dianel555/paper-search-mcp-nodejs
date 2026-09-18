@@ -8,7 +8,7 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)
 
 ## 💖 Sponsors
 
@@ -133,6 +133,8 @@ cp .env.example .env
    SCRAPINGANT_PROXY_TYPE=datacenter
    
    # Controlled Sci-Hub adapter; disabled unless explicitly enabled.
+   # Mirror addresses are discovered from the Sci-Hub and ooopn directory pages.
+   # SCIHUB_MIRRORS is optional and accepts comma-separated supplemental URLs.
    SCIHUB_ENABLED=false
    SCIHUB_FETCH_MODE=fallback
    SCIHUB_MIRRORS=
@@ -422,6 +424,8 @@ Controlled, opt-in Sci-Hub DOI lookup/download; disabled by default and not an o
 
 ```typescript
 // Requires SCIHUB_ENABLED=true. DOI/doi.org inputs only.
+// Mirrors are discovered from https://sci-hub.mobi/en/mirrors and
+// https://www.ooopn.com/tool/scihub/; SCIHUB_MIRRORS adds optional comma-separated URLs.
 search_scihub({
   doiOrUrl: "10.1038/nature12373",
   downloadPdf: true,
@@ -836,7 +840,7 @@ ScrapingAnt is an optional, paid public-page fallback: a key alone does not enab
 
 - **Opt-in only**: Disabled by default; accepts DOI, `doi:` and `doi.org` forms only
 - **Controlled fallback**: Direct mirror lookup first, then bounded ScrapingAnt Extended HTML fallback when enabled
-- **Health monitoring**: Five seeded mirrors, max three concurrent direct checks, cached and single-flight
+- **Mirror discovery and health monitoring**: Fetches mirror lists from `https://sci-hub.mobi/en/mirrors` and `https://www.ooopn.com/tool/scihub/`, merges optional `SCIHUB_MIRRORS` supplements, then performs max-three-concurrent direct checks with caching and single-flight
 - **Explicit states**: Distinguishes not-found, blocked, markup-changed, unhealthy, and transport failures
 - **Safe PDF handling**: Public-target redirect checks, MIME/magic/size validation, temporary files, and atomic replacement
 - **Compliance notice**: Does not grant access rights or claim copyright/authorization status

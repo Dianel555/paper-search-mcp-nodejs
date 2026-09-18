@@ -116,7 +116,6 @@ claudedocs/
 
 #Pi
 .pi/
-
 #openspec
 openspec/
 
@@ -134,6 +133,7 @@ test-*.js
 scratch/
 temp/
 benchmark.md
+AGENTS.md
 
 # MCP server debugging
 debug-*.js

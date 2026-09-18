@@ -1,8 +1,8 @@
 /**
  * Controlled Sci-Hub HTML adapter.
  *
- * This integration is disabled by default, uses only operator-supplied/seeded
- * mirror pages, and never treats an HTML mirror as an official API.
+ * This integration is disabled by default, discovers bounded mirror lists from
+ * configured directory pages, and never treats an HTML mirror as an official API.
  */
 
 import * as cheerio from 'cheerio';
@@ -85,6 +85,8 @@ export interface SciHubSearcherOptions {
   publicHttpClient?: SciHubPublicHttpRequester;
   /** Isolated health probe seam; supplying it does not select the legacy path. */
   healthHttpClient?: SciHubPublicHttpRequester;
+  /** Isolated mirror-directory discovery seam for deterministic tests. */
+  mirrorDiscoveryHttpClient?: SciHubPublicHttpRequester;
   downloadHttpClient?: SciHubPublicHttpRequester;
   scrapingAntFetcher?: SciHubFallbackFetcher;
   retrievalService?: SciHubRetrievalService;
@@ -211,20 +213,29 @@ interface HealthFlight {
   timedOut: boolean;
 }
 
-const MAX_CANDIDATES = 20;
+interface MirrorDiscoveryResult {
+  readonly sourceUrl: string;
+  readonly mirrors: string[];
+  readonly succeeded: boolean;
+}
 
-const DEFAULT_MIRRORS = [
-  'https://sci-hub.se',
-  'https://sci-hub.st',
-  'https://sci-hub.ru',
-  'https://sci-hub.red',
-  'https://sci-hub.box'
-];
+const MAX_CANDIDATES = 20;
+const MAX_DISCOVERED_MIRRORS = 20;
+const MIRROR_DIRECTORY_MAX_BYTES = 512 * 1024;
+
+export const SCIHUB_MIRROR_DIRECTORY_URLS = [
+  'https://sci-hub.mobi/en/mirrors',
+  'https://www.ooopn.com/tool/scihub/'
+] as const;
+
+const MIRROR_DIRECTORY_PATTERN = /镜像|mirror/i;
 
 export class SciHubSearcher extends PaperSource {
   private readonly mirrorSites: MirrorSite[];
+  private readonly configuredMirrorUrls: string[];
   private readonly publicHttpClient: SciHubPublicHttpRequester;
   private readonly healthHttpClient: SciHubPublicHttpRequester;
+  private readonly mirrorDiscoveryHttpClient: SciHubPublicHttpRequester;
   private readonly downloadHttpClient: SciHubPublicHttpRequester;
   private readonly retrievalService: SciHubRetrievalService;
   private readonly securityPolicy: OutboundSecurityPolicy;
@@ -235,6 +246,7 @@ export class SciHubSearcher extends PaperSource {
   private readonly enabled: boolean;
   private readonly fetchMode: 'direct' | 'fallback';
   private lastHealthCheck: Date | null = null;
+  private discoveredMirrorsBySource = new Map<string, string[]>();
   private healthFlight: HealthFlight | null = null;
   private healthFlightSequence = 0;
   private lastSuccessfulMirror?: string;
@@ -244,12 +256,13 @@ export class SciHubSearcher extends PaperSource {
   private complianceNoticeEmitted = false;
 
   constructor(options: SciHubSearcherOptions = {}) {
-    super('scihub', 'https://sci-hub.se');
+    super('scihub', SCIHUB_MIRROR_DIRECTORY_URLS[0]);
     this.enabled = options.enabled ?? isTruthy(process.env.SCIHUB_ENABLED);
     this.fetchMode = options.fetchMode || (process.env.SCIHUB_FETCH_MODE === 'direct' ? 'direct' : 'fallback');
     this.healthCheckConcurrency = options.healthCheckConcurrency ?? readPositiveInteger(process.env.SCIHUB_HEALTHCHECK_CONCURRENCY, 3);
     this.publicHttpClient = options.publicHttpClient || new ControlledPublicHttpClient({ purpose: 'scihub_lookup' });
     this.healthHttpClient = options.healthHttpClient || this.publicHttpClient;
+    this.mirrorDiscoveryHttpClient = options.mirrorDiscoveryHttpClient || this.publicHttpClient;
     this.downloadHttpClient = options.downloadHttpClient || this.publicHttpClient;
     this.validateUrl = options.validateUrl || ((url: string) => validatePublicHttpUrl(url));
     this.securityPolicy = options.securityPolicy || new OutboundSecurityPolicy({
@@ -265,11 +278,13 @@ export class SciHubSearcher extends PaperSource {
       securityPolicy: this.securityPolicy
     });
 
-    const configuredMirrors = (options.mirrors || process.env.SCIHUB_MIRRORS?.split(',') || [])
+    const configuredMirrorValues = options.mirrors
+      ?? (process.env.SCIHUB_MIRRORS || '').split(',');
+    this.configuredMirrorUrls = [...new Set(configuredMirrorValues
+      .flatMap(value => value.split(','))
       .map(value => normalizeMirror(value))
-      .filter((value): value is string => Boolean(value));
-    const mirrorUrls = [...new Set([...DEFAULT_MIRRORS, ...configuredMirrors])];
-    this.mirrorSites = mirrorUrls.map(url => ({
+      .filter((value): value is string => Boolean(value)))];
+    this.mirrorSites = this.configuredMirrorUrls.map(url => ({
       url,
       status: this.enabled ? 'not_checked' : 'disabled',
       failureCount: 0
@@ -698,7 +713,9 @@ export class SciHubSearcher extends PaperSource {
       await this.checkMirrorHealth(false, signal);
     }
     const available = this.mirrorSites.filter(mirror => mirror.status !== 'disabled');
-    if (!available.length) throw new Error('No Sci-Hub mirrors configured');
+    if (!available.length) {
+      throw new Error('No Sci-Hub mirrors were discovered or configured');
+    }
     // A direct health failure is not proof that the mirror has no content:
     // retain the bounded mirror list so the controlled ScrapingAnt fallback
     // can handle a blocked or dynamically-rendered landing page. Health
@@ -778,9 +795,29 @@ export class SciHubSearcher extends PaperSource {
   }
 
   private async performHealthCheck(signal: AbortSignal): Promise<void> {
+    const discoveries = await Promise.all(
+      SCIHUB_MIRROR_DIRECTORY_URLS.map(sourceUrl => this.discoverMirrorSource(sourceUrl, signal))
+    );
+    if (signal.aborted) return;
+
+    const discoveredMirrorsBySource = new Map(this.discoveredMirrorsBySource);
+    discoveries.forEach(result => {
+      if (result.succeeded) discoveredMirrorsBySource.set(result.sourceUrl, result.mirrors);
+    });
+    const mirrorUrls = [...new Set([
+      ...this.configuredMirrorUrls,
+      ...[...discoveredMirrorsBySource.values()].flat()
+    ])];
+    const existingMirrors = new Map(this.mirrorSites.map(mirror => [mirror.url, mirror]));
+    const mirrors = mirrorUrls.map(url => existingMirrors.get(url) || {
+      url,
+      status: 'not_checked' as const,
+      failureCount: 0
+    });
+
     const limit = createConcurrencyLimiter(this.healthCheckConcurrency);
     const snapshots: Array<MirrorSite | undefined> = [];
-    await Promise.all(this.mirrorSites.map((mirror, index) => limit(async () => {
+    await Promise.all(mirrors.map((mirror, index) => limit(async () => {
       const startedAt = Date.now();
       let response: PublicHttpResponse | undefined;
       try {
@@ -813,14 +850,53 @@ export class SciHubSearcher extends PaperSource {
     }, signal)));
 
     if (signal.aborted) return;
-    snapshots.forEach((snapshot, index) => {
-      if (snapshot) this.mirrorSites[index] = snapshot;
-    });
+    const publishedMirrors = mirrors.map((mirror, index) => snapshots[index] || mirror);
+    this.discoveredMirrorsBySource = discoveredMirrorsBySource;
+    this.mirrorSites.splice(0, this.mirrorSites.length, ...publishedMirrors);
     this.lastHealthCheck = new Date();
     if (!this.mirrorSites.some(mirror => mirror.status === 'working')) {
       logWarn('No Sci-Hub mirrors are currently accessible');
     }
     logDebug(`Sci-Hub health check completed for ${this.mirrorSites.length} mirrors`);
+  }
+
+  private async discoverMirrorSource(sourceUrl: string, signal: AbortSignal): Promise<MirrorDiscoveryResult> {
+    let response: PublicHttpResponse<string> | undefined;
+    try {
+      response = await this.mirrorDiscoveryHttpClient.request<string>(sourceUrl, {
+        method: 'GET',
+        responseType: 'text',
+        timeout: TIMEOUTS.HEALTH_CHECK,
+        maxContentLength: MIRROR_DIRECTORY_MAX_BYTES,
+        maxBodyLength: MIRROR_DIRECTORY_MAX_BYTES,
+        signal
+      });
+      if (signal.aborted) return { sourceUrl, mirrors: [], succeeded: false };
+      if (response.response.status < 200 || response.response.status >= 300) {
+        throw new Error(`mirror directory returned status ${response.response.status}`);
+      }
+
+      const mirrors: string[] = [];
+      for (const mirror of extractMirrorUrls(toHtml(response.response.data), sourceUrl)) {
+        try {
+          await this.validateCandidateUrl(mirror, 'scihub_lookup', signal);
+          mirrors.push(mirror);
+        } catch (error) {
+          if (signal.aborted || isAbortError(error)) {
+            return { sourceUrl, mirrors: [], succeeded: false };
+          }
+        }
+      }
+      if (!mirrors.length) throw new Error('no validated mirrors found');
+      return { sourceUrl, mirrors, succeeded: true };
+    } catch {
+      if (!signal.aborted) {
+        logWarn(`Sci-Hub mirror discovery failed for ${new URL(sourceUrl).hostname}; using cached/configured mirrors`);
+      }
+      return { sourceUrl, mirrors: [], succeeded: false };
+    } finally {
+      disposeResponseBody(response?.response.data);
+    }
   }
 
   private updateMirrorFailure(mirror: MirrorSite, status: SciHubLookupStatus): void {
@@ -1048,7 +1124,44 @@ function createAbortError(): Error {
   return error;
 }
 
-function normalizeMirror(value: string): string | undefined {
+export function extractMirrorUrls(html: string, sourceUrl: string): string[] {
+  const $ = cheerio.load(html || '');
+  const sourceHost = new URL(sourceUrl).hostname.toLowerCase();
+  const selector = sourceHost === 'www.ooopn.com'
+    ? 'table.scholar-table tbody td.url-cell a[href]'
+    : 'main a[href]';
+  const mirrors: string[] = [];
+  const seen = new Set<string>();
+
+  $(selector).each((_index, element) => {
+    if (mirrors.length >= MAX_DISCOVERED_MIRRORS) return false;
+    const link = $(element);
+    const href = link.attr('href')?.trim();
+    if (!href) return;
+    if (sourceHost !== 'www.ooopn.com') {
+      const label = [link.text(), link.attr('title'), link.attr('aria-label')]
+        .filter(Boolean)
+        .join(' ');
+      const external = /^https?:\/\//i.test(href) || link.attr('target') === '_blank';
+      if (!external || !MIRROR_DIRECTORY_PATTERN.test(label)) return;
+    }
+
+    try {
+      const mirror = normalizeMirror(new URL(href, sourceUrl).toString());
+      if (mirror && !seen.has(mirror)) {
+        seen.add(mirror);
+        mirrors.push(mirror);
+      }
+    } catch {
+      // Ignore malformed or unsupported links from the external directory.
+    }
+    return;
+  });
+
+  return mirrors;
+}
+
+export function normalizeMirror(value: string): string | undefined {
   try {
     const url = new URL(value.trim());
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') return undefined;

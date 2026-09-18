@@ -96,14 +96,29 @@ describe('parseToolArgs', () => {
   });
 
   describe('get_paper_by_doi', () => {
-    it('should apply platform default', () => {
-      const args = parseToolArgs('get_paper_by_doi', { doi: '10.1038/nature12373' });
-      expect(args.platform).toBe('all');
+    it('accepts exactly the declared platform values and applies the all default', () => {
+      expect(parseToolArgs('get_paper_by_doi', { doi: '10.1038/nature12373' }).platform).toBe('all');
+      for (const platform of ['arxiv', 'webofscience', 'scihub', 'all']) {
+        expect(parseToolArgs('get_paper_by_doi', {
+          doi: '10.1038/nature12373',
+          platform
+        }).platform).toBe(platform);
+      }
+      expect(() => parseToolArgs('get_paper_by_doi', {
+        doi: '10.1038/nature12373',
+        platform: 'scrapingant'
+      })).toThrow();
     });
 
-    it('accepts the existing Sci-Hub DOI route', () => {
-      const args = parseToolArgs('get_paper_by_doi', { doi: '10.1038/nature12373', platform: 'scihub' });
-      expect(args.platform).toBe('scihub');
+    it('strips unknown fields without changing the validated DOI route', () => {
+      const args = parseToolArgs('get_paper_by_doi', {
+        doi: '10.1038/nature12373',
+        platform: 'scihub',
+        provider: 'scrapingant',
+        purpose: 'publisher_discovery',
+        budget: 500
+      });
+      expect(args).toEqual({ doi: '10.1038/nature12373', platform: 'scihub' });
     });
   });
 

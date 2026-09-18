@@ -342,7 +342,7 @@ export const TOOLS: Tool[] = [
         doi: { type: 'string', description: 'DOI (Digital Object Identifier)' },
         platform: {
           type: 'string',
-          enum: ['arxiv', 'webofscience', 'all'],
+          enum: ['arxiv', 'webofscience', 'scihub', 'all'],
           description: 'Platform to search'
         }
       },

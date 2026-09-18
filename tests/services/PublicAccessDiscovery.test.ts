@@ -639,6 +639,9 @@ describe('PublicAccessDiscovery', () => {
         service.reconcileCost(operation, reservation!, { known: true, credits: 3 });
         resolve();
       }));
+      const reconciledStatus = service.getOperationStatus(operation);
+      service.reconcileCost(operation, reservation!, { known: true, credits: 3 });
+      expect(service.getOperationStatus(operation)).toEqual(reconciledStatus);
       const otherOperation = service.createOperation();
       try {
         await service.retrieve({

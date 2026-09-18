@@ -2,12 +2,49 @@ import { describe, expect, it, jest } from '@jest/globals';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Readable } from 'node:stream';
-import { SciHubSearcher, extractPdfCandidates, normalizeSciHubInput } from '../../src/platforms/SciHubSearcher.js';
+import {
+  SciHubSearcher as BaseSciHubSearcher,
+  extractMirrorUrls,
+  extractPdfCandidates,
+  normalizeSciHubInput,
+  type SciHubSearcherOptions
+} from '../../src/platforms/SciHubSearcher.js';
 import { PublicHttpClient } from '../../src/services/PublicHttpClient.js';
 import { ScrapingAntFetcher } from '../../src/services/ScrapingAntFetcher.js';
 import { RetrievalError, type RetrievalOperationContext, type RetrievalResponse } from '../../src/retrieval/types.js';
 import { OutboundSecurityPolicy } from '../../src/retrieval/OutboundSecurityPolicy.js';
 import type { RetrievalStrategyStep } from '../../src/retrieval/RetrievalService.js';
+
+const TEST_MIRROR_DIRECTORY_HTML = `
+  <main>
+    <a href="https://sci-hub.se" target="_blank" title="Visit mirror">Visit mirror</a>
+    <a href="https://sci-hub.st" target="_blank" title="Visit mirror">Visit mirror</a>
+    <a href="https://sci-hub.ru" target="_blank" title="Visit mirror">Visit mirror</a>
+    <a href="https://sci-hub.red" target="_blank" title="Visit mirror">Visit mirror</a>
+  </main>`;
+const TEST_OOOPN_DIRECTORY_HTML = `
+  <table class="scholar-table"><tbody>
+    <tr><td class="url-cell"><a href="https://sci-hub.box">https://sci-hub.box</a></td></tr>
+  </tbody></table>`;
+
+function mirrorDiscoveryRequest() {
+  return {
+    request: jest.fn(async (url: string) => ({
+      response: {
+        status: 200,
+        headers: {},
+        data: url.includes('ooopn.com') ? TEST_OOOPN_DIRECTORY_HTML : TEST_MIRROR_DIRECTORY_HTML
+      },
+      finalUrl: url
+    } as any))
+  };
+}
+
+class SciHubSearcher extends BaseSciHubSearcher {
+  constructor(options: SciHubSearcherOptions = {}) {
+    super({ mirrorDiscoveryHttpClient: mirrorDiscoveryRequest(), ...options });
+  }
+}
 
 const validateUrl = async (url: string) => ({
   url,
@@ -201,7 +238,16 @@ describe('SciHub controlled adapter', () => {
     });
     const abandoned = new AbortController();
     const abandonedWaiter = searcher.forceHealthCheck(abandoned.signal);
-    await Promise.resolve();
+    await new Promise<void>(resolve => {
+      const waitForHealthRequest = () => {
+        if (requestCount > 0) {
+          resolve();
+          return;
+        }
+        setImmediate(waitForHealthRequest);
+      };
+      waitForHealthRequest();
+    });
     abandoned.abort();
     await expect(abandonedWaiter).rejects.toThrow(/aborted/i);
 
@@ -277,6 +323,175 @@ describe('SciHub controlled adapter', () => {
     expect(extractPdfCandidates('<iframe src="/files/paper.pdf"></iframe>', 'https://mirror.example/10.1000/test')).toEqual([
       'https://mirror.example/files/paper.pdf'
     ]);
+  });
+
+  it('parses only mirror entries from each default directory layout', () => {
+    expect(extractMirrorUrls(`
+      <nav><a href="/mirrors">Mirrors</a></nav>
+      <main>
+        <a href="https://sci-hub.run/" target="_blank" title="Visit mirror">Visit mirror</a>
+        <a href="https://ads.example/" target="_blank" title="Sponsored link">Sponsored link</a>
+      </main>
+    `, 'https://sci-hub.mobi/en/mirrors')).toEqual(['https://sci-hub.run']);
+    expect(extractMirrorUrls(`
+      <table class="scholar-table"><tbody>
+        <tr><td class="url-cell"><a href="https://sci-hub.jp/">https://sci-hub.jp</a></td></tr>
+        <tr><td><a href="https://not-a-mirror.example/">ignored</a></td></tr>
+      </tbody></table>
+    `, 'https://www.ooopn.com/tool/scihub/')).toEqual(['https://sci-hub.jp']);
+  });
+
+  it('discovers both default directories and keeps comma-separated env mirrors as supplements', async () => {
+    process.env.SCIHUB_MIRRORS = 'https://configured.example, https://sci-hub.se';
+    const healthUrls: string[] = [];
+    const searcher = new SciHubSearcher({
+      enabled: true,
+      healthHttpClient: {
+        request: jest.fn(async (url: string) => {
+          healthUrls.push(url);
+          return healthResponse();
+        })
+      },
+      validateUrl
+    });
+
+    await searcher.forceHealthCheck();
+
+    expect(new Set(healthUrls)).toEqual(new Set([
+      'https://configured.example',
+      'https://sci-hub.se',
+      'https://sci-hub.st',
+      'https://sci-hub.ru',
+      'https://sci-hub.red',
+      'https://sci-hub.box'
+    ]));
+    expect(searcher.getMirrorStatus()).toHaveLength(6);
+  });
+
+  it('keeps configured mirrors usable when both default directories fail', async () => {
+    const discovery = {
+      request: jest.fn(async () => {
+        throw new Error('directory unavailable');
+      })
+    };
+    const health = healthyMirrorRequest();
+    const searcher = new SciHubSearcher({
+      enabled: true,
+      mirrors: ['https://configured.example'],
+      mirrorDiscoveryHttpClient: discovery,
+      healthHttpClient: health,
+      validateUrl
+    });
+
+    await searcher.forceHealthCheck();
+
+    expect(discovery.request).toHaveBeenCalledTimes(2);
+    expect(health.request).toHaveBeenCalledTimes(1);
+    expect(searcher.getMirrorStatus().map(mirror => mirror.url)).toEqual(['https://configured.example']);
+  });
+
+  it('uses a successful default directory when the other source fails', async () => {
+    const discovery = {
+      request: jest.fn(async (url: string) => {
+        if (url.includes('ooopn.com')) throw new Error('directory unavailable');
+        return {
+          response: { status: 200, headers: {}, data: TEST_MIRROR_DIRECTORY_HTML },
+          finalUrl: url
+        } as any;
+      })
+    };
+    const searcher = new SciHubSearcher({
+      enabled: true,
+      mirrorDiscoveryHttpClient: discovery,
+      healthHttpClient: healthyMirrorRequest(),
+      validateUrl
+    });
+
+    await searcher.forceHealthCheck();
+
+    expect(searcher.getMirrorStatus().map(mirror => mirror.url)).toEqual([
+      'https://sci-hub.se',
+      'https://sci-hub.st',
+      'https://sci-hub.ru',
+      'https://sci-hub.red'
+    ]);
+  });
+
+  it('retains the last successful source list when a refresh returns no mirrors', async () => {
+    let requestCount = 0;
+    const discovery = {
+      request: jest.fn(async (url: string) => {
+        requestCount++;
+        const data = requestCount <= 2
+          ? url.includes('ooopn.com') ? TEST_OOOPN_DIRECTORY_HTML : TEST_MIRROR_DIRECTORY_HTML
+          : '<main><p>No mirror entries</p></main>';
+        return { response: { status: 200, headers: {}, data }, finalUrl: url } as any;
+      })
+    };
+    const searcher = new SciHubSearcher({
+      enabled: true,
+      mirrorDiscoveryHttpClient: discovery,
+      healthHttpClient: healthyMirrorRequest(),
+      validateUrl
+    });
+
+    await searcher.forceHealthCheck();
+    const firstSnapshot = searcher.getMirrorStatus().map(mirror => mirror.url);
+    await searcher.forceHealthCheck();
+
+    expect(searcher.getMirrorStatus().map(mirror => mirror.url)).toEqual(firstSnapshot);
+  });
+
+  it('does not publish a late mirror discovery after cancellation', async () => {
+    const resolvers: Array<(value: any) => void> = [];
+    const discovery = {
+      request: jest.fn(() => new Promise<any>(resolve => { resolvers.push(resolve); }))
+    };
+    const searcher = new SciHubSearcher({
+      enabled: true,
+      mirrorDiscoveryHttpClient: discovery,
+      healthHttpClient: healthyMirrorRequest(),
+      validateUrl
+    });
+    const controller = new AbortController();
+    const pending = searcher.forceHealthCheck(controller.signal);
+    await new Promise<void>(resolve => {
+      const waitForSources = () => resolvers.length === 2 ? resolve() : setImmediate(waitForSources);
+      waitForSources();
+    });
+
+    controller.abort();
+    await expect(pending).rejects.toThrow(/aborted/i);
+    resolvers.forEach(resolve => resolve({
+      response: { status: 200, headers: {}, data: TEST_MIRROR_DIRECTORY_HTML },
+      finalUrl: 'https://sci-hub.mobi/en/mirrors'
+    }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(searcher.getMirrorStatus()).toEqual([]);
+    expect(searcher.getStatus().healthCheckedAt).toBeUndefined();
+  });
+
+  it('searches discovered defaults when SCIHUB_ENABLED is the only Sci-Hub configuration', async () => {
+    process.env.SCIHUB_ENABLED = 'true';
+    delete process.env.SCIHUB_MIRRORS;
+    const service = fakeSciHubService(async strategy => sciHubResponse(
+      strategy,
+      '<a href="https://cdn.example/discovered.pdf">PDF</a>'
+    ));
+    const searcher = new SciHubSearcher({
+      fetchMode: 'direct',
+      retrievalService: service,
+      healthHttpClient: healthyMirrorRequest(),
+      validateUrl
+    });
+
+    expect(searcher.getCapabilities().search).toBe(true);
+    await expect(searcher.search('10.1000/discovered')).resolves.toEqual([
+      expect.objectContaining({ pdfUrl: 'https://cdn.example/discovered.pdf' })
+    ]);
+    expect(service.retrieveWithStrategies).toHaveBeenCalled();
   });
 
   it('does not call ScrapingAnt for a direct not_found result', async () => {

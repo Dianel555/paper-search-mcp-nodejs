@@ -1321,6 +1321,54 @@ describe('RetrievalService', () => {
     operation.dispose();
   });
 
+  it('closes future paid dispatch after a late actual overrun without reopening', async () => {
+    let resolveLate!: (value: RetrievalResponse) => void;
+    const lateResponse = new Promise<RetrievalResponse>(resolve => { resolveLate = resolve; });
+    let providerStarted!: () => void;
+    const providerReady = new Promise<void>(resolve => { providerStarted = resolve; });
+    const paidRetrieve = jest.fn(async () => {
+      providerStarted();
+      return lateResponse;
+    });
+    const service = serviceWith(paidRetrieve, undefined, { budget: 5 });
+    const operation = service.createOperation();
+    const requestController = new AbortController();
+    const pending = service.retrieveWithRetry({ ...paidRequest, signal: requestController.signal }, operation);
+    await providerReady;
+    requestController.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled', provider: 'paid' });
+
+    const reservation = service.getOperationReservation(operation, 'retrieval-attempt-1');
+    expect(reservation).toBeDefined();
+    expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
+      admissionUsed: 1,
+      reportedCredits: 0,
+      unknownCostAttempts: 1,
+      paidClosed: false
+    }));
+
+    resolveLate(response('paid', 'static', { known: true, credits: 6 }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    const afterLate = service.getOperationStatus(operation);
+    expect(afterLate).toEqual(expect.objectContaining({
+      admissionUsed: 6,
+      reportedCredits: 6,
+      reportedCreditsKnown: true,
+      unknownCostAttempts: 0,
+      paidClosed: true,
+      paidClosedReason: 'actual_cost_exceeded'
+    }));
+    const afterLateSnapshot = JSON.stringify(afterLate);
+    service.reconcileCost(operation, reservation!, { known: true, credits: 6 });
+    expect(JSON.stringify(service.getOperationStatus(operation))).toBe(afterLateSnapshot);
+    await expect(service.retrieve(paidRequest, operation)).rejects.toMatchObject({ code: 'budget' });
+    expect(paidRetrieve).toHaveBeenCalledTimes(1);
+    operation.dispose();
+  });
+
   it('reconciles late cost carried by a cancelled compatibility provider error', async () => {
     let rejectProvider!: (error: RetrievalError) => void;
     let providerStarted!: () => void;

@@ -39,6 +39,7 @@ afterEach(() => {
   delete process.env.SCRAPINGANT_PROXY_TYPE;
   delete process.env.SCRAPINGANT_PUBLIC_COOKIES_BY_HOST_JSON;
   delete process.env.SCIHUB_ENABLED;
+  delete process.env.SCIHUB_MIRRORS;
   delete process.env.CROSSREF_MAILTO;
   delete process.env.WOS_VERBOSE_LOGGING;
 });

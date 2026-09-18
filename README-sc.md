@@ -7,7 +7,7 @@
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)
 
 ## 💖 赞助商
 
@@ -131,6 +131,8 @@ cp .env.example .env
    SCRAPINGANT_PROXY_TYPE=datacenter
    
    # 受控 Sci-Hub 适配器；除非显式开启，否则关闭
+   # 镜像地址会在查询时从 Sci-Hub 和 ooopn 镜像目录页动态获取。
+   # SCIHUB_MIRRORS 可选，支持逗号分隔的补充网址。
    SCIHUB_ENABLED=false
    SCIHUB_FETCH_MODE=fallback
    SCIHUB_MIRRORS=
@@ -420,6 +422,8 @@ search_iacr({
 
 ```typescript
 // 需要设置 SCIHUB_ENABLED=true；仅接受 DOI/doi.org URL。
+// 默认从 https://sci-hub.mobi/en/mirrors 和
+// https://www.ooopn.com/tool/scihub/ 获取镜像；SCIHUB_MIRRORS 可补充多个逗号分隔的网址。
 search_scihub({
   doiOrUrl: "10.1038/nature12373",
   downloadPdf: true,
@@ -808,7 +812,7 @@ export NODE_ENV=development
 
 - **仅显式启用**：默认关闭；只接受 DOI、`doi:` 和 `doi.org` URL
 - **受控后备**：先直连镜像，受阻时才在已配置 ScrapingAnt 后使用 Extended HTML 后备
-- **健康检查**：五个固定种子镜像，最多三个并发直连检查，带缓存和 single-flight
+- **镜像发现与健康检查**：查询时从 `https://sci-hub.mobi/en/mirrors` 和 `https://www.ooopn.com/tool/scihub/` 获取镜像，合并可选的 `SCIHUB_MIRRORS` 补充项，再以最多三个并发直连检查，并带缓存和 single-flight
 - **明确状态**：区分未收录、受阻、DOM变化、镜像不健康和传输失败
 - **安全 PDF 处理**：公网目标重定向校验、MIME/魔数/大小校验、临时文件和原子替换
 - **合规提示**：不授予访问权，也不声称内容具有版权或授权状态

@@ -1,6 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { TOOLS } from '../../src/mcp/tools.js';
 import { createCallToolHandler } from '../../src/mcp/callToolHandler.js';
+import { handleToolCall } from '../../src/mcp/handleToolCall.js';
 import { registerMcpHandlers } from '../../src/mcp/registerHandlers.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { RetrievalService } from '../../src/retrieval/RetrievalService.js';
@@ -11,13 +12,44 @@ import { RetrievalCostPolicy } from '../../src/retrieval/RetrievalCostPolicy.js'
 import { parseRetrievalConfiguration, type RetrievalConfiguration } from '../../src/retrieval/Configuration.js';
 import { OutboundSecurityPolicy } from '../../src/retrieval/OutboundSecurityPolicy.js';
 import { RetrievalError, type RetrievalOperationContext, type RetrievalProvider, type RetrievalResponse } from '../../src/retrieval/types.js';
-import { SciHubSearcher } from '../../src/platforms/SciHubSearcher.js';
+import { SciHubSearcher as BaseSciHubSearcher, type SciHubSearcherOptions } from '../../src/platforms/SciHubSearcher.js';
 import { GoogleScholarSearcher } from '../../src/platforms/GoogleScholarSearcher.js';
 import { WebOfScienceSearcher } from '../../src/platforms/WebOfScienceSearcher.js';
 import { QuotaManager } from '../../src/utils/QuotaManager.js';
 import { PaperFactory } from '../../src/models/Paper.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+
+const TEST_MIRROR_DIRECTORY_HTML = `
+  <main>
+    <a href="https://sci-hub.se" target="_blank" title="Visit mirror">Visit mirror</a>
+    <a href="https://sci-hub.st" target="_blank" title="Visit mirror">Visit mirror</a>
+    <a href="https://sci-hub.ru" target="_blank" title="Visit mirror">Visit mirror</a>
+    <a href="https://sci-hub.red" target="_blank" title="Visit mirror">Visit mirror</a>
+  </main>`;
+const TEST_OOOPN_DIRECTORY_HTML = `
+  <table class="scholar-table"><tbody>
+    <tr><td class="url-cell"><a href="https://sci-hub.box">https://sci-hub.box</a></td></tr>
+  </tbody></table>`;
+
+function mirrorDiscoveryRequest() {
+  return {
+    request: jest.fn(async (url: string) => ({
+      response: {
+        status: 200,
+        headers: {},
+        data: url.includes('ooopn.com') ? TEST_OOOPN_DIRECTORY_HTML : TEST_MIRROR_DIRECTORY_HTML
+      },
+      finalUrl: url
+    } as any))
+  };
+}
+
+class SciHubSearcher extends BaseSciHubSearcher {
+  constructor(options: SciHubSearcherOptions = {}) {
+    super({ mirrorDiscoveryHttpClient: mirrorDiscoveryRequest(), ...options });
+  }
+}
 
 function makeOperation(signal: AbortSignal, id: string): RetrievalOperationContext & { dispose: jest.Mock } {
   return {
@@ -157,6 +189,145 @@ describe('MCP retrieval composition', () => {
     const names = new Set(TOOLS.map(tool => tool.name));
     expect(names.has('discover_paper_access')).toBe(true);
     expect(TOOLS.filter(tool => tool.name === 'discover_paper_access')).toHaveLength(1);
+  });
+
+  it('advertises the exact get_paper_by_doi platform contract through tools/list', async () => {
+    const handlers = new Map<unknown, (...args: any[]) => Promise<any>>();
+    const server = {
+      setRequestHandler: jest.fn((schema: unknown, handler: (...args: any[]) => Promise<any>) => {
+        handlers.set(schema, handler);
+      })
+    } as any;
+    registerMcpHandlers(server, () => makeSearchers());
+
+    const listed = await handlers.get(ListToolsRequestSchema)!({});
+    const tool = listed.tools.find((entry: any) => entry.name === 'get_paper_by_doi');
+
+    expect(tool?.inputSchema.properties.platform.enum).toEqual([
+      'arxiv',
+      'webofscience',
+      'scihub',
+      'all'
+    ]);
+  });
+
+  it('routes registered DOI calls and keeps all fan-out on the canonical business registry', async () => {
+    const operations: Array<RetrievalOperationContext & { dispose: jest.Mock }> = [];
+    const service = {
+      createOperation: jest.fn(({ signal }: { signal: AbortSignal }) => {
+        const operation = makeOperation(signal, `doi-operation-${operations.length + 1}`);
+        operations.push(operation);
+        return operation;
+      })
+    };
+    const base = makeSearchers(service) as any;
+    const platformNames = ['arxiv', 'webofscience', 'pubmed', 'scihub', 'crossref'];
+    const lookups = new Map<string, jest.Mock>();
+    const platformRegistry: Record<string, any> = {};
+    for (const platformName of platformNames) {
+      const searcher = {
+        ...base.arxiv,
+        getPaperByDoi: jest.fn(async () => null)
+      };
+      lookups.set(platformName, searcher.getPaperByDoi);
+      platformRegistry[platformName] = searcher;
+      (base as any)[platformName] = searcher;
+    }
+    base.platforms = platformRegistry;
+    const handler = registeredCallHandler(base);
+    const signal = new AbortController().signal;
+    const call = (platform?: string) => handler(
+      { params: {
+        name: 'get_paper_by_doi',
+        arguments: platform === undefined
+          ? { doi: 'doi:10.1000/Canonical' }
+          : { doi: 'doi:10.1000/Canonical', platform }
+      } },
+      { signal }
+    );
+
+    await call('scihub');
+    await call('arxiv');
+    await call('webofscience');
+    await call('all');
+    await call();
+
+    expect(lookups.get('scihub')).toHaveBeenCalledWith(
+      '10.1000/Canonical',
+      expect.objectContaining({ operationContext: expect.any(Object) })
+    );
+    expect(lookups.get('arxiv')).toHaveBeenCalledWith(
+      '10.1000/Canonical',
+      expect.objectContaining({ operationContext: expect.any(Object) })
+    );
+    expect(lookups.get('webofscience')).toHaveBeenCalledWith(
+      '10.1000/Canonical',
+      expect.objectContaining({ operationContext: expect.any(Object) })
+    );
+    expect(lookups.get('scihub')).toHaveBeenCalledTimes(3);
+    expect(lookups.get('arxiv')).toHaveBeenCalledTimes(3);
+    expect(lookups.get('webofscience')).toHaveBeenCalledTimes(3);
+    expect(lookups.get('pubmed')).toHaveBeenCalledTimes(2);
+    expect(lookups.get('crossref')).toHaveBeenCalledTimes(2);
+    expect(operations).toHaveLength(5);
+    expect(operations.every(operation => operation.dispose.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('rejects unsupported DOI inputs before creating an operation', async () => {
+    const searcherFactory = jest.fn(() => makeSearchers());
+    const handler = createCallToolHandler(searcherFactory);
+    const signal = new AbortController().signal;
+
+    for (const arguments_ of [
+      { doi: '10.1000/test', platform: 'unsupported' },
+      { doi: '10.1000/test', platform: 'scrapingant' },
+      { doi: '10.1000/test', platform: 42 },
+      { platform: 'scihub' }
+    ]) {
+      const response = await handler(
+        { params: { name: 'get_paper_by_doi', arguments: arguments_ } },
+        { signal }
+      );
+      expect(response.isError).toBe(true);
+    }
+    expect(searcherFactory).not.toHaveBeenCalled();
+  });
+
+  it('keeps invalid DOI and disabled Sci-Hub calls at zero transport and download', async () => {
+    const base = makeSearchers() as any;
+    const lookup = jest.fn(async () => null);
+    const download = jest.fn(async () => 'unexpected.pdf');
+    base.scihub = {
+      ...base.scihub,
+      getPaperByDoi: lookup,
+      downloadPdf: download
+    };
+    await expect(handleToolCall(
+      'get_paper_by_doi',
+      { doi: 'not-a-doi', platform: 'scihub' },
+      base
+    )).rejects.toThrow(/DOI/i);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+
+    const transport = jest.fn();
+    const disabled = new SciHubSearcher({
+      enabled: false,
+      publicHttpClient: { request: transport } as any,
+      downloadHttpClient: { request: transport } as any,
+      retrievalService: {
+        createOperation: jest.fn(),
+        getProcessStatus: jest.fn(() => ({ enabled: false, browserAllowed: false })),
+        retrieveWithStrategies: jest.fn()
+      } as any
+    });
+    base.scihub = disabled;
+    await expect(handleToolCall(
+      'get_paper_by_doi',
+      { doi: '10.1000/test', platform: 'scihub' },
+      base
+    )).rejects.toThrow(/disabled/i);
+    expect(transport).not.toHaveBeenCalled();
   });
 
   it('passes the actual request extra.signal into one parent operation and child discovery', async () => {
@@ -631,6 +802,124 @@ describe('MCP retrieval composition', () => {
       reportedCreditsKnown: false
     }));
     expect(operation.signal.aborted).toBe(true);
+  });
+
+  it('continues a spare-budget unknown-cost paid lookup through real MCP discovery', async () => {
+    let paidAttempts = 0;
+    const direct = jest.fn(async (request: any) => ({
+      provider: 'direct',
+      strategy: 'direct',
+      targetStatus: 200,
+      document: {
+        kind: 'html',
+        html: '<div id="pdf"></div><script src="/viewer.js"></script>',
+        iframes: [],
+        source: { provenance: 'trusted_direct' as const, finalUrl: request.url },
+        targetStatus: 200
+      },
+      cost: { known: true as const, credits: 0 }
+    } satisfies RetrievalResponse));
+    const paid = jest.fn(async (request: any) => {
+      paidAttempts++;
+      return {
+        provider: 'scrapingant',
+        strategy: 'static',
+        apiStatus: 200,
+        targetStatus: 200,
+        document: {
+          kind: 'html',
+          html: `<a href="https://publisher.example/spare-${paidAttempts}.pdf">PDF</a>`,
+          iframes: [],
+          source: { provenance: 'unknown_remote' as const, submittedUrl: request.url },
+          targetStatus: 200
+        },
+        cost: paidAttempts === 1
+          ? { known: false as const, credits: null, reason: 'missing_billing_header' }
+          : { known: true as const, credits: 1 }
+      } satisfies RetrievalResponse;
+    });
+    const configuration = paidConfiguration(2);
+    const service = new RetrievalService({
+      directProvider: {
+        name: 'direct',
+        capabilities: { html: true, iframeDocuments: false, pdfCandidates: false, browser: false, paid: false },
+        retrieve: direct
+      },
+      scrapingAntProvider: {
+        name: 'scrapingant',
+        capabilities: { html: true, iframeDocuments: true, pdfCandidates: true, browser: true, paid: true },
+        retrieve: paid
+      },
+      configuration,
+      costPolicy: new RetrievalCostPolicy({ budget: 2, maxCreditsPerRequest: 10, enabled: true }),
+      securityPolicy: integrationSecurityPolicy()
+    });
+    const discovery = new PublicAccessDiscovery(undefined, {
+      configuration,
+      retrievalService: service,
+      publicHttpRequester: {
+        request: jest.fn(async (config: any) => String(config.url).includes('doi.org')
+          ? { status: 302, headers: { location: 'https://publisher.example/article' }, data: undefined }
+          : { status: 200, headers: {}, data: undefined })
+      },
+      validateUrl: async url => ({
+        url,
+        hostname: new URL(url).hostname,
+        addresses: [{ address: '93.184.216.34', family: 4 as const }]
+      })
+    });
+    const papers = [
+      PaperFactory.create({ paperId: 'spare-one', title: 'One', source: 'wos', doi: '10.1000/spare-one' }),
+      PaperFactory.create({ paperId: 'spare-two', title: 'Two', source: 'wos', doi: '10.1000/spare-two' })
+    ];
+    const baseSearchers = makeSearchers(service);
+    const webofscience = {
+      ...baseSearchers.webofscience,
+      search: jest.fn(async (_query: string, options: any) => discovery.enrich(papers, {
+        operation: options.operationContext,
+        maxItems: 2
+      }))
+    };
+    const searchers = {
+      ...baseSearchers,
+      webofscience,
+      wos: webofscience,
+      platforms: { ...baseSearchers.platforms, webofscience },
+      retrievalService: service
+    } as any;
+    const handler = registeredCallHandler(searchers);
+    const createOperation = jest.spyOn(service, 'createOperation');
+
+    const result = await handler(
+      { params: { name: 'search_webofscience', arguments: {
+        query: 'spare-budget',
+        maxResults: 2,
+        discoverAccess: true,
+        discoverAccessMaxItems: 2
+      } } },
+      { signal: new AbortController().signal }
+    );
+    const body = JSON.parse(result.content[0].text.slice(result.content[0].text.indexOf('\n\n') + 2));
+    const operation = createOperation.mock.results[0].value as RetrievalOperationContext;
+    const extras = body.map((paper: any) => JSON.parse(paper.extra));
+
+    expect(result.isError).toBeUndefined();
+    expect(extras.map((extra: any) => extra.accessDiscovery?.status)).toEqual(['oa_candidate', 'oa_candidate']);
+    expect(body.map((paper: any) => paper.pdf_url)).toEqual([
+      'https://publisher.example/spare-1.pdf',
+      'https://publisher.example/spare-2.pdf'
+    ]);
+    expect(direct).toHaveBeenCalledTimes(2);
+    expect(paid).toHaveBeenCalledTimes(2);
+    expect(service.getOperationStatus(operation)).toEqual(expect.objectContaining({
+      requestCount: 4,
+      strategyCounts: { direct: 2, static: 2, browser: 0 },
+      admissionUsed: 2,
+      reportedCredits: 1,
+      reportedCreditsKnown: false,
+      unknownCostAttempts: 1,
+      paidClosed: false
+    }));
   });
 
   it.each([

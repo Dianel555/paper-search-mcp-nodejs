@@ -26,7 +26,7 @@ export function registerMcpHandlers(
       },
       serverInfo: {
         name: 'paper-search-mcp-nodejs',
-        version: '0.3.1'
+        version: '0.3.2'
       }
     };
   });
