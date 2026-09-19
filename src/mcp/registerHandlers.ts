@@ -26,7 +26,7 @@ export function registerMcpHandlers(
       },
       serverInfo: {
         name: 'paper-search-mcp-nodejs',
-        version: '0.3.2'
+        version: '0.3.3'
       }
     };
   });
@@ -41,7 +41,13 @@ export function registerMcpHandlers(
     return { tools: TOOLS };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, createCallToolHandler(searcherFactory));
+  const callToolHandler = createCallToolHandler(searcherFactory);
+  server.setRequestHandler(CallToolRequestSchema, callToolHandler);
+  const previousOnClose = server.onclose;
+  server.onclose = () => {
+    callToolHandler.dispose();
+    previousOnClose?.();
+  };
 }
 
 export default registerMcpHandlers;

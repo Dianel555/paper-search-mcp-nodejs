@@ -7,6 +7,11 @@ import { CitationService } from '../services/CitationService.js';
 import { sanitizeBody, sanitizeDownloadPath, sanitizeDoi, sanitizeSensitiveText } from '../utils/SecurityUtils.js';
 import { logDebug } from '../utils/Logger.js';
 import type { RetrievalOperationContext, RetrievalPurpose } from '../retrieval/types.js';
+import type { ScholarReferenceCache } from './ScholarReferenceCache.js';
+import { PublicPaperService } from '../services/PublicPaperService.js';
+import { publicPaperDestinationPath } from '../services/ControlledPdfDownloader.js';
+import { diagnostics, noProviderCost } from './publicPaperContracts.js';
+import * as fs from 'node:fs';
 
 const citationService = new CitationService();
 
@@ -93,24 +98,83 @@ function findJsonEnd(text: string, start: number): number | undefined {
   return undefined;
 }
 
+export interface ToolRuntimeContext {
+  readonly scholarReferenceCache?: ScholarReferenceCache;
+}
+
 export async function handleToolCall(
   toolNameRaw: string,
   rawArgs: unknown,
   searchers: Searchers,
-  operationContext?: RetrievalOperationContext
+  operationContext?: RetrievalOperationContext,
+  runtime?: ToolRuntimeContext
 ) {
   const toolName = toolNameRaw as ToolName;
   // Validate and normalize business arguments before creating an operation.
   // Invalid input must not even allocate a retrieval budget or deadline.
   const args = parseToolArgs(toolName, rawArgs);
+  const preflight = await preflightPublicToolCall(toolName, args, runtime?.scholarReferenceCache);
+  if (preflight) return preflight;
   const ownedOperation = operationContext ? undefined : searchers.retrievalService?.createOperation({
     purpose: retrievalPurposeForToolCall(toolName, args)
   });
   const operation = operationContext || ownedOperation;
   try {
-    return await handleToolCallWithContext(toolName, args, searchers, operation);
+    return await handleToolCallWithContext(toolName, args, searchers, operation, runtime);
   } finally {
     ownedOperation?.dispose?.();
+  }
+}
+
+export async function preflightPublicToolCall(
+  toolName: ToolName,
+  args: any,
+  scholarReferenceCache?: ScholarReferenceCache
+): Promise<ReturnType<typeof jsonTextResponse> | undefined> {
+  if (toolName !== 'download_public_paper' && toolName !== 'get_paper_markdown') return undefined;
+  if (args.platform === 'googlescholar') {
+    const lookup = scholarReferenceCache?.get(args.paperId) || { status: 'missing' as const };
+    if (lookup.status !== 'hit') {
+      return jsonTextResponse(JSON.stringify({
+        platform: args.platform,
+        normalizedPaperId: args.paperId,
+        status: 'reference_unavailable',
+        diagnostics: diagnostics('reference', lookup.status === 'expired'
+          ? 'reference_expired' : lookup.status === 'ambiguous' ? 'reference_ambiguous' : 'reference_missing'),
+        cost: noProviderCost()
+      }, null, 2));
+    }
+  }
+  if (toolName === 'download_public_paper') {
+    const pathResult = sanitizePublicSaveDirectory(args.savePath);
+    if (!pathResult.valid) throw new Error(pathResult.error || 'Invalid save path');
+    const destination = publicPaperDestinationPath(pathResult.sanitized, args.platform, args.paperId);
+    if (await pathExists(destination)) {
+      return jsonTextResponse(JSON.stringify({
+        platform: args.platform,
+        normalizedPaperId: args.paperId,
+        status: 'destination_exists',
+        diagnostics: diagnostics('download', 'destination_exists'),
+        cost: noProviderCost()
+      }, null, 2));
+    }
+  }
+  return undefined;
+}
+
+function sanitizePublicSaveDirectory(savePath?: string): { valid: boolean; sanitized: string; error?: string } {
+  // The strict schema exposes './downloads' as its default; avoid resolving
+  // that already-rooted value relative to the same root a second time.
+  return sanitizeDownloadPath(savePath === './downloads' ? undefined : savePath, './downloads');
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.promises.lstat(filePath);
+    return true;
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
   }
 }
 
@@ -120,6 +184,12 @@ export function retrievalPurposeForToolCall(toolName: ToolName, args: any): Retr
       return 'scholar_search';
     case 'discover_paper_access':
       return 'publisher_discovery';
+    case 'download_public_paper':
+    case 'get_paper_markdown':
+      if (args?.platform === 'publisher') return 'publisher_discovery';
+      if (args?.platform === 'googlescholar') return 'scholar_search';
+      if (args?.platform === 'scihub') return 'scihub_lookup';
+      return undefined;
     case 'search_webofscience':
       return args?.discoverAccess === true ? 'publisher_discovery' : undefined;
     case 'search_papers':
@@ -140,7 +210,8 @@ async function handleToolCallWithContext(
   toolNameRaw: string,
   args: any,
   searchers: Searchers,
-  operation?: RetrievalOperationContext
+  operation?: RetrievalOperationContext,
+  runtime?: ToolRuntimeContext
 ) {
   const toolName = toolNameRaw as ToolName;
 
@@ -173,6 +244,7 @@ async function handleToolCallWithContext(
         fieldsOfStudy,
         sortBy,
         sortOrder,
+        ...(platform === 'scihub' ? { entrypointProfile: 'search_scihub' as const } : {}),
         ...(operation ? { operationContext: operation } : {})
       };
 
@@ -364,6 +436,41 @@ async function handleToolCallWithContext(
       );
     }
 
+    case 'download_public_paper': {
+      const { paperId, platform, savePath } = args;
+      const pathResult = sanitizePublicSaveDirectory(savePath);
+      if (!pathResult.valid) throw new Error(pathResult.error || 'Invalid save path');
+      const service = searchers.publicPaper || new PublicPaperService({
+        retrievalService: searchers.retrievalService as any,
+        publicAccess: searchers.publicAccess as any,
+        scihub: searchers.scihub as any
+      });
+      const result = await service.download({
+        platform,
+        paperId,
+        saveDirectory: pathResult.sanitized,
+        operation: operation!,
+        scholarReferenceCache: runtime?.scholarReferenceCache
+      });
+      return jsonTextResponse(JSON.stringify(result, null, 2));
+    }
+
+    case 'get_paper_markdown': {
+      const { paperId, platform } = args;
+      const service = searchers.publicPaper || new PublicPaperService({
+        retrievalService: searchers.retrievalService as any,
+        publicAccess: searchers.publicAccess as any,
+        scihub: searchers.scihub as any
+      });
+      const result = await service.markdown({
+        platform,
+        paperId,
+        operation: operation!,
+        scholarReferenceCache: runtime?.scholarReferenceCache
+      });
+      return jsonTextResponse(JSON.stringify(result, null, 2));
+    }
+
     case 'download_paper': {
       const { paperId, platform, savePath } = args;
       const pathResult = sanitizeDownloadPath(savePath, './downloads');
@@ -386,6 +493,7 @@ async function handleToolCallWithContext(
         : undefined;
       const filePath = await searcher.downloadPdf(paperId, {
         savePath: resolvedSavePath,
+        entrypointProfile: 'legacy_download' as const,
         ...(operation ? { operationContext: operation } : {})
       });
       return jsonTextResponse(`${notice ? `${notice}\n\n` : ''}PDF downloaded successfully to: ${filePath}`);
@@ -400,6 +508,8 @@ async function handleToolCallWithContext(
         author,
         ...(operation ? { operationContext: operation } : {})
       } as any);
+
+      for (const paper of results) runtime?.scholarReferenceCache?.put(paper);
 
       return jsonTextResponse(
         `Found ${results.length} Google Scholar papers.\n\n${JSON.stringify(
@@ -483,7 +593,7 @@ async function handleToolCallWithContext(
       }
       const resolvedSavePath = pathResult.sanitized;
 
-      const results = await searchers.scihub.search(doiOrUrl, operation ? { operationContext: operation } : undefined);
+      const results = await searchers.scihub.search(doiOrUrl, operation ? { operationContext: operation, entrypointProfile: 'search_scihub' } : { entrypointProfile: 'search_scihub' });
       const notice = searchers.scihub.consumeComplianceNotice();
       if (results.length === 0) {
         return jsonTextResponse(`${notice ? `${notice}\n\n` : ''}No paper found on Sci-Hub for: ${doiOrUrl}`);
@@ -496,6 +606,7 @@ async function handleToolCallWithContext(
         try {
           const filePath = await searchers.scihub.downloadPdf(doiOrUrl, {
             savePath: resolvedSavePath,
+            entrypointProfile: 'legacy_download',
             ...(operation ? { operationContext: operation } : {})
           });
           responseText += `\n\nPDF downloaded successfully to: ${filePath}`;

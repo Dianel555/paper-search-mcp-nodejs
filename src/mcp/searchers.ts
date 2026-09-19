@@ -15,8 +15,10 @@ import { PublicAccessDiscovery } from '../services/PublicAccessDiscovery.js';
 import { RetrievalService } from '../retrieval/RetrievalService.js';
 import { DirectHttpProvider } from '../retrieval/DirectHttpProvider.js';
 import { ScrapingAntProvider } from '../retrieval/ScrapingAntProvider.js';
+import { PublicHttpClient } from '../services/PublicHttpClient.js';
 import { parseRetrievalConfiguration } from '../retrieval/Configuration.js';
 import { logDebug } from '../utils/Logger.js';
+import { PublicPaperService } from '../services/PublicPaperService.js';
 
 export interface Searchers {
   arxiv: ArxivSearcher;
@@ -42,6 +44,8 @@ export interface Searchers {
   platforms: Record<string, any>;
   /** Operation factory owned by the MCP composition boundary. */
   retrievalService: RetrievalService;
+  /** Explicit public-paper/Markdown composition service. */
+  publicPaper?: PublicPaperService;
 }
 
 let searchers: Searchers | null = null;
@@ -58,7 +62,10 @@ export function initializeSearchers(): Searchers {
     retrievalServiceFactory: scholarHttpClient => {
       retrievalService = new RetrievalService({
         directProvider: new DirectHttpProvider({
-          publicHttpClients: { scholar_search: scholarHttpClient }
+          publicHttpClients: { scholar_search: scholarHttpClient },
+          publicHttpClientsByProfile: {
+            public_landing: new PublicHttpClient({ purpose: 'publisher_discovery' })
+          }
         }),
         scrapingAntProvider: new ScrapingAntProvider({ apiKey: retrievalConfiguration.scrapingAnt.apiKey }),
         configuration: retrievalConfiguration
@@ -92,6 +99,11 @@ export function initializeSearchers(): Searchers {
     process.env.SCOPUS_SEARCH_API_KEY
   );
   const crossrefSearcher = new CrossrefSearcher(process.env.CROSSREF_MAILTO);
+  const publicPaper = new PublicPaperService({
+    retrievalService,
+    publicAccess: publicAccessDiscovery,
+    scihub: sciHubSearcher
+  });
 
   searchers = {
     arxiv: arxivSearcher,
@@ -127,7 +139,8 @@ export function initializeSearchers(): Searchers {
       scopus: scopusSearcher,
       crossref: crossrefSearcher
     },
-    retrievalService
+    retrievalService,
+    publicPaper
   };
 
   logDebug('Searchers initialized successfully');

@@ -104,7 +104,7 @@ export class PublicHttpClient {
 
     for (let redirect = 0; redirect <= this.maxRedirects; redirect++) {
       throwIfAborted(config.signal);
-      if (this.purpose === 'pdf_probe' && hasSensitiveCandidateCredentials(currentUrl)) {
+      if ((this.purpose === 'pdf_probe' || this.purpose === 'pdf_download') && hasSensitiveCandidateCredentials(currentUrl)) {
         throw new SensitiveOutboundTargetError();
       }
       const validation = await awaitWithAbort(

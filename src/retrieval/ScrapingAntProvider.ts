@@ -44,6 +44,7 @@ export class ScrapingAntProvider implements RetrievalProvider {
     html: true,
     iframeDocuments: true,
     pdfCandidates: true,
+    markdown: true,
     browser: true,
     paid: true,
     proxyTypes: ['datacenter', 'residential'],
@@ -69,6 +70,14 @@ export class ScrapingAntProvider implements RetrievalProvider {
   }
 
   async retrieve(request: RetrievalRequest, context: RetrievalOperationContext): Promise<RetrievalResponse> {
+    if (request.documentFormat === 'markdown'
+      && (request.strategy !== 'static' || (request.proxyType ?? 'datacenter') !== 'datacenter')) {
+      throw new RetrievalError({
+        code: 'invalid_request',
+        message: 'Markdown retrieval only accepts the static datacenter combination',
+        provider: this.name
+      });
+    }
     if (request.strategy !== 'static' && request.strategy !== 'browser') {
       throw new RetrievalError({
         code: 'invalid_request',
@@ -117,9 +126,11 @@ export class ScrapingAntProvider implements RetrievalProvider {
       throw providerDeadlineError();
     }
 
-    const endpoint = request.documentFormat === 'html_with_iframes'
-      ? API_ENDPOINTS.SCRAPINGANT_EXTENDED
-      : API_ENDPOINTS.SCRAPINGANT_GENERAL;
+    const endpoint = request.documentFormat === 'markdown'
+      ? API_ENDPOINTS.SCRAPINGANT_MARKDOWN
+      : request.documentFormat === 'html_with_iframes'
+        ? API_ENDPOINTS.SCRAPINGANT_EXTENDED
+        : API_ENDPOINTS.SCRAPINGANT_GENERAL;
     const requestConfig: AxiosRequestConfig = {
       method: 'GET',
       url: endpoint,
@@ -219,7 +230,9 @@ export class ScrapingAntProvider implements RetrievalProvider {
       // header. A target 429 still establishes the conservative shared source
       // cooldown before this lease is released.
       if (pageStatus === 429) this.sourceScheduler.observeRetryAfter(safeOrigin(request.url), 429, {});
-      const document = createDocument(parsed, request.url, pageStatus);
+      const document = request.documentFormat === 'markdown'
+        ? createMarkdownDocument(parsed, request.url, pageStatus)
+        : createDocument(parsed, request.url, pageStatus);
       return {
         provider: this.name,
         strategy: request.strategy,
@@ -378,6 +391,40 @@ function tryParseJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+function createMarkdownDocument(payload: unknown, _submittedUrl: string, targetStatus?: number): FiniteDocument {
+  const body = payload && typeof payload === 'object' && !Buffer.isBuffer(payload) && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : undefined;
+  const markdown = typeof body?.markdown === 'string' ? body.markdown : undefined;
+  if (!markdown || !markdown.trim()) {
+    throw new RetrievalError({
+      code: 'provider_error',
+      message: 'ScrapingAnt Markdown response is empty or invalid',
+      provider: 'scrapingant',
+      targetStatus,
+      failureKind: 'response_body'
+    });
+  }
+  if (targetStatus === undefined) {
+    throw new RetrievalError({
+      code: 'provider_error',
+      message: 'ScrapingAnt Markdown response did not include target status',
+      provider: 'scrapingant',
+      failureKind: 'response_body'
+    });
+  }
+  return {
+    kind: 'markdown',
+    html: '',
+    iframes: [],
+    markdown,
+    // Markdown is isolated from URL provenance. The target is never returned
+    // as an observed/final URL to the LLM-facing boundary.
+    source: { provenance: 'unknown_remote', submittedUrl: '[redacted]' },
+    targetStatus
+  };
 }
 
 function createDocument(payload: unknown, submittedUrl: string, targetStatus?: number): FiniteDocument {

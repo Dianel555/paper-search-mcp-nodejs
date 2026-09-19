@@ -9,7 +9,7 @@ import { hasSensitiveCandidateCredentials, OutboundSecurityError } from '../retr
 import { parseRetrievalCredits } from '../retrieval/RetrievalCostPolicy.js';
 import { RetrievalError, type RetrievalCostObservation, type RetrievalErrorCode } from '../retrieval/types.js';
 
-type ScrapingAntEndpoint = 'general' | 'extended';
+type ScrapingAntEndpoint = 'general' | 'extended' | 'markdown';
 type ProxyType = 'datacenter' | 'residential';
 
 export interface ScrapingAntIframe {
@@ -19,6 +19,7 @@ export interface ScrapingAntIframe {
 
 export interface ScrapingAntResult {
   html: string;
+  markdown?: string;
   text?: string;
   apiStatus: number;
   pageStatus?: number;
@@ -132,6 +133,9 @@ export class ScrapingAntFetcher {
     if (this.proxyType === 'residential' || options.proxyType === 'residential') {
       throw new CapabilityUnavailableError('scrapingant', 'fetch', 'Residential proxy retrieval is not supported');
     }
+    if (options.endpoint === 'markdown' && options.browser) {
+      throw new CapabilityUnavailableError('scrapingant', 'fetch', 'Markdown retrieval only supports static datacenter requests');
+    }
     if (options.browser && process.env.SCRAPINGANT_ALLOW_BROWSER_ESCALATION !== 'true') {
       throw new CapabilityUnavailableError('scrapingant', 'fetch', 'Browser escalation is not explicitly enabled');
     }
@@ -163,7 +167,9 @@ export class ScrapingAntFetcher {
 
   private async fetchOnce(targetUrl: string, options: ScrapingAntFetchOptions): Promise<ScrapingAntResult> {
     const endpoint = options.endpoint || 'general';
-    const endpointUrl = endpoint === 'extended' ? API_ENDPOINTS.SCRAPINGANT_EXTENDED : API_ENDPOINTS.SCRAPINGANT_GENERAL;
+    const endpointUrl = endpoint === 'markdown'
+      ? API_ENDPOINTS.SCRAPINGANT_MARKDOWN
+      : endpoint === 'extended' ? API_ENDPOINTS.SCRAPINGANT_EXTENDED : API_ENDPOINTS.SCRAPINGANT_GENERAL;
     throwIfAborted(options.signal);
     let response: ScrapingAntResponse | undefined;
     let observedCredits: number | undefined;
@@ -234,7 +240,7 @@ export class ScrapingAntFetcher {
         throw new ScrapingAntError(`ScrapingAnt request failed with status ${Number.isFinite(status) ? status : 'unknown'}`, status, responseCredits);
       }
 
-      const result = this.parseResult(parsePayload(payload), status, response.headers, responseCredits);
+      const result = this.parseResult(parsePayload(payload), status, response.headers, responseCredits, endpoint);
       this.lastPageStatus = result.pageStatus;
       logDebug(`ScrapingAnt ${endpoint} completed (${status}, page ${result.pageStatus ?? 'unknown'}, credits ${result.creditsCost ?? 0})`);
       return result;
@@ -269,9 +275,21 @@ export class ScrapingAntFetcher {
     return { status, creditsCost };
   }
 
-  private parseResult(data: any, apiStatus: number, responseHeaders: unknown, responseCredits?: number): ScrapingAntResult {
+  private parseResult(
+    data: any,
+    apiStatus: number,
+    responseHeaders: unknown,
+    responseCredits?: number,
+    endpoint: ScrapingAntEndpoint = 'general'
+  ): ScrapingAntResult {
     const body = data && typeof data === 'object' && !Buffer.isBuffer(data) ? data : {};
-    const html = typeof data === 'string'
+    const markdown = endpoint === 'markdown' && typeof body.markdown === 'string' && body.markdown.trim()
+      ? body.markdown
+      : undefined;
+    if (endpoint === 'markdown' && !markdown) {
+      throw new ScrapingAntError('ScrapingAnt Markdown response is empty or invalid', apiStatus, responseCredits, 'provider_error');
+    }
+    const html = endpoint === 'markdown' ? '' : typeof data === 'string'
       ? data
       : Buffer.isBuffer(data)
         ? data.toString('utf8')
@@ -292,12 +310,12 @@ export class ScrapingAntFetcher {
 
     return {
       html,
+      ...(markdown ? { markdown } : {}),
       text: typeof body.text === 'string' ? body.text : undefined,
       apiStatus,
       pageStatus,
       creditsCost,
-      headers: sanitizeResponseHeaders(body.headers),
-      iframes
+      ...(endpoint === 'markdown' ? {} : { headers: sanitizeResponseHeaders(body.headers), iframes }),
     };
   }
 

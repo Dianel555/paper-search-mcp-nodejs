@@ -12,9 +12,13 @@ export interface RetrievalBudgetDefaults {
   readonly maxCreditsPerRequest: number;
 }
 
+export type AuthorizedCorpusPlatform = 'publisher' | 'googlescholar' | 'scihub';
+
 export interface ScrapingAntRetrievalConfiguration {
   readonly apiKey?: string;
   readonly configured: boolean;
+  readonly authorizedCorpusAllowed: boolean;
+  readonly authorizedCorpusPlatforms: readonly AuthorizedCorpusPlatform[];
   readonly enabled: boolean;
   readonly paidEnabled: boolean;
   readonly browserAllowed: boolean;
@@ -46,6 +50,11 @@ export function parseRetrievalConfiguration(
   const enabled = isStrictTrue(environment.SCRAPINGANT_ENABLED);
   const browserAllowed = isStrictTrue(environment.SCRAPINGANT_ALLOW_BROWSER_ESCALATION);
   const residentialAllowed = isStrictTrue(environment.SCRAPINGANT_ALLOW_RESIDENTIAL);
+  const authorizedCorpusAllowed = isStrictTrue(environment.SCRAPINGANT_ALLOW_AUTHORIZED_CORPUS);
+  const authorizedCorpusPlatforms = parseAuthorizedCorpusPlatforms(
+    environment.SCRAPINGANT_AUTHORIZED_CORPUS_PLATFORMS,
+    warnings
+  );
   const invalidFields: string[] = [];
 
   const explicitOperationBudget = parseOptionalPositiveSafeInteger(
@@ -103,6 +112,8 @@ export function parseRetrievalConfiguration(
     scrapingAnt: {
       apiKey,
       configured: Boolean(apiKey),
+      authorizedCorpusAllowed,
+      authorizedCorpusPlatforms,
       enabled,
       paidEnabled,
       browserAllowed: paidEnabled && browserAllowed,
@@ -188,6 +199,33 @@ function parseBoundedPositiveInteger(
   if (Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum) return parsed;
   invalidFields.push(field);
   return fallback;
+}
+
+function parseAuthorizedCorpusPlatforms(
+  value: string | undefined,
+  warnings: string[]
+): readonly AuthorizedCorpusPlatform[] {
+  if (value === undefined || value.trim() === '') return [];
+  const supported = new Set<AuthorizedCorpusPlatform>(['publisher', 'googlescholar', 'scihub']);
+  const platforms: AuthorizedCorpusPlatform[] = [];
+  let hadInvalid = false;
+  for (const token of value.split(',').map(entry => entry.trim().toLowerCase()).filter(Boolean)) {
+    if (!supported.has(token as AuthorizedCorpusPlatform)) {
+      hadInvalid = true;
+      continue;
+    }
+    if (!platforms.includes(token as AuthorizedCorpusPlatform)) platforms.push(token as AuthorizedCorpusPlatform);
+  }
+  if (hadInvalid) warnings.push('SCRAPINGANT_AUTHORIZED_CORPUS_PLATFORMS contains unsupported platform tokens; they were ignored');
+  return platforms;
+}
+
+export function isAuthorizedCorpusPlatform(
+  configuration: RetrievalConfiguration,
+  platform: string
+): platform is AuthorizedCorpusPlatform {
+  return configuration.scrapingAnt.authorizedCorpusAllowed
+    && configuration.scrapingAnt.authorizedCorpusPlatforms.includes(platform as AuthorizedCorpusPlatform);
 }
 
 function parseDiscoveryDefault(value: string | undefined, warnings: string[]): number {

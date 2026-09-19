@@ -703,6 +703,28 @@ describe('RetrievalService', () => {
     }
   });
 
+  it('isolates completed strategy responses by target while sharing scope selection limits', async () => {
+    const retrieve = jest.fn(async (request: RetrievalRequest) => {
+      if (request.url.includes('mirror-a')) {
+        throw new RetrievalError({ code: 'network', message: 'mirror unavailable', retryable: true });
+      }
+      return response('paid');
+    });
+    const service = serviceWith(retrieve, undefined, { retrySleep: async () => undefined, retryRandom: () => 0 });
+    const operation = service.createOperation();
+    try {
+      await expect(service.retrieveWithRetry({ ...paidRequest, url: 'https://mirror-a.example/page' }, operation, {
+        strategyScopeId: 'shared-mirror-scope'
+      })).rejects.toMatchObject({ code: 'network' });
+      await expect(service.retrieveWithRetry({ ...paidRequest, url: 'https://mirror-b.example/page' }, operation, {
+        strategyScopeId: 'shared-mirror-scope'
+      })).resolves.toMatchObject({ provider: 'paid' });
+      expect(retrieve.mock.calls.some(([request]) => request.url === 'https://mirror-b.example/page')).toBe(true);
+    } finally {
+      operation.dispose();
+    }
+  });
+
   it('shares one strategy flight across concurrent waiters while isolating waiter cancellation', async () => {
     let release!: () => void;
     let started!: () => void;

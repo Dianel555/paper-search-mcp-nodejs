@@ -305,6 +305,51 @@ export const TOOLS: Tool[] = [
     }
   },
   {
+    name: 'download_public_paper',
+    description: 'Download a public paper from Publisher, Google Scholar, or Sci-Hub using bounded page fallback and local PDF validation',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        platform: {
+          type: 'string',
+          enum: ['publisher', 'googlescholar', 'scihub'],
+          description: 'Canonical public-paper platform'
+        },
+        paperId: {
+          type: 'string',
+          description: 'DOI for Publisher/Sci-Hub, or a current-session Google Scholar reference'
+        },
+        savePath: {
+          type: 'string',
+          default: './downloads',
+          description: 'Validated download directory; the output filename is derived internally'
+        }
+      },
+      required: ['platform', 'paperId']
+    }
+  },
+  {
+    name: 'get_paper_markdown',
+    description: 'Explicitly retrieve bounded, untrusted ScrapingAnt Markdown for a Publisher, Scholar, or Sci-Hub paper reference',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        platform: {
+          type: 'string',
+          enum: ['publisher', 'googlescholar', 'scihub'],
+          description: 'Canonical Markdown platform'
+        },
+        paperId: {
+          type: 'string',
+          description: 'DOI for Publisher/Sci-Hub, or a current-session Google Scholar reference'
+        }
+      },
+      required: ['platform', 'paperId']
+    }
+  },
+  {
     name: 'search_google_scholar',
     description: 'Search Google Scholar for academic papers using web scraping',
     inputSchema: {

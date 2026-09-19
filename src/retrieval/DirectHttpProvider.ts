@@ -7,6 +7,7 @@ import {
   type RetrievalOperationContext,
   type RetrievalProvider,
   type RetrievalPurpose,
+  type RetrievalTransportProfile,
   type RetrievalRequest,
   type RetrievalResponse
 } from './types.js';
@@ -25,6 +26,8 @@ export interface DirectHttpProviderOptions {
   publicHttpClient?: DirectHttpClient;
   /** Internal purpose routing for isolated transports such as Scholar sessions. */
   publicHttpClients?: Partial<Record<RetrievalPurpose, DirectHttpClient>>;
+  /** Internal finite profile routing for public landing/download clients. */
+  publicHttpClientsByProfile?: Partial<Record<RetrievalTransportProfile, DirectHttpClient>>;
   maxResponseBytes?: number;
 }
 
@@ -45,11 +48,13 @@ export class DirectHttpProvider implements RetrievalProvider {
 
   private readonly publicHttpClient: DirectHttpClient;
   private readonly publicHttpClients: Partial<Record<RetrievalPurpose, DirectHttpClient>>;
+  private readonly publicHttpClientsByProfile: Partial<Record<RetrievalTransportProfile, DirectHttpClient>>;
   private readonly maxResponseBytes: number;
 
   constructor(options: DirectHttpProviderOptions = {}) {
     this.publicHttpClient = options.publicHttpClient || new PublicHttpClient({ purpose: 'retrieval' });
     this.publicHttpClients = options.publicHttpClients || {};
+    this.publicHttpClientsByProfile = options.publicHttpClientsByProfile || {};
     this.maxResponseBytes = options.maxResponseBytes ?? MAX_RETRIEVAL_RESPONSE_BYTES;
   }
 
@@ -71,7 +76,11 @@ export class DirectHttpProvider implements RetrievalProvider {
     let response: PublicHttpResponse<unknown> | undefined;
     let responseBodyStarted = false;
     const linkedSignal = linkAbortSignals(context.signal, request.signal);
-    const publicHttpClient = this.publicHttpClients[request.purpose] || this.publicHttpClient;
+    const publicHttpClient = (request.transportProfile
+      ? this.publicHttpClientsByProfile[request.transportProfile]
+      : undefined)
+      || this.publicHttpClients[request.purpose]
+      || this.publicHttpClient;
     try {
       throwIfAborted(context, linkedSignal.signal);
       response = await publicHttpClient.request(request.url, {
@@ -130,6 +139,16 @@ export class DirectHttpProvider implements RetrievalProvider {
           message: 'Retrieval operation was cancelled',
           provider: this.name,
           failureKind: retrievalFailureKindForAbort(linkedSignal.signal, context)
+        });
+      }
+      const observedTargetStatus = response ? toHttpStatus(response.response.status) : undefined;
+      if (isPermissionTargetStatus(observedTargetStatus)) {
+        throw new RetrievalError({
+          code: 'target_unavailable',
+          message: 'Public target requires permission',
+          provider: this.name,
+          targetStatus: observedTargetStatus,
+          failureKind: responseBodyStarted ? 'response_body' : undefined
         });
       }
       if (isTimeoutError(error) || context.remainingMs() <= 0) {
@@ -218,6 +237,15 @@ function ensureSize(size: number, maxBytes: number, body?: unknown): void {
     provider: 'direct',
     failureKind: 'response_body'
   });
+}
+
+function toHttpStatus(value: unknown): number | undefined {
+  const status = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(status) ? status : undefined;
+}
+
+function isPermissionTargetStatus(status: number | undefined): boolean {
+  return status === 401 || status === 407 || status === 423;
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {

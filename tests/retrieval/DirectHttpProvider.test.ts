@@ -53,6 +53,27 @@ describe('DirectHttpProvider', () => {
     expect(generalRequest).toHaveBeenCalledTimes(1);
   });
 
+  it('routes public landing requests through the finite profile without Scholar transport', async () => {
+    const scholarRequest = jest.fn(async () => response('<html>scholar</html>', 200, 'https://scholar.google.com/scholar'));
+    const landingRequest = jest.fn(async () => response('<html>landing</html>', 200, 'https://publisher.example/article'));
+    const provider = new DirectHttpProvider({
+      publicHttpClient: { request: scholarRequest },
+      publicHttpClientsByProfile: { public_landing: { request: landingRequest } }
+    });
+
+    const result = await provider.retrieve({
+      url: 'https://publisher.example/article',
+      purpose: 'scholar_search',
+      strategy: 'direct',
+      transportProfile: 'public_landing',
+      documentFormat: 'html'
+    }, context());
+
+    expect(result.document?.html).toBe('<html>landing</html>');
+    expect(landingRequest).toHaveBeenCalledTimes(1);
+    expect(scholarRequest).not.toHaveBeenCalled();
+  });
+
   it('returns the checked final URL, target status, and bounded document', async () => {
     const request = jest.fn(async (_url: string, _config: unknown) => response('<html>ok</html>', 404));
     const provider = new DirectHttpProvider({ publicHttpClient: { request } });
@@ -78,6 +99,21 @@ describe('DirectHttpProvider', () => {
       method: 'GET',
       responseType: 'stream'
     }));
+  });
+
+  it('preserves a permission status when the target body fails after headers', async () => {
+    const body = Readable.from((async function* () {
+      yield Buffer.from('<html>restricted</html>');
+      throw new Error('body stream failed');
+    })());
+    const request = jest.fn(async () => response(body, 401));
+    const provider = new DirectHttpProvider({ publicHttpClient: { request } });
+    await expect(provider.retrieve({
+      url: 'https://publisher.example/restricted',
+      purpose: 'publisher_discovery',
+      strategy: 'direct',
+      documentFormat: 'html'
+    }, context())).rejects.toMatchObject({ code: 'target_unavailable', targetStatus: 401 });
   });
 
   it('accepts decompressed bodies below and at the limit and rejects one byte over it', async () => {

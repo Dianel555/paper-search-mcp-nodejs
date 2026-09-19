@@ -141,6 +141,29 @@ describe('retrieval configuration', () => {
     });
   });
 
+  it('parses authorized-corpus admission without changing public paid enablement', () => {
+    const authorized = parseRetrievalConfiguration({
+      SCRAPINGANT_API_KEY: 'key',
+      SCRAPINGANT_ENABLED: 'true',
+      SCRAPINGANT_ALLOW_AUTHORIZED_CORPUS: 'true',
+      SCRAPINGANT_AUTHORIZED_CORPUS_PLATFORMS: 'publisher, googlescholar, invalid, publisher'
+    });
+    expect(authorized.scrapingAnt.authorizedCorpusAllowed).toBe(true);
+    expect(authorized.scrapingAnt.authorizedCorpusPlatforms).toEqual(['publisher', 'googlescholar']);
+    expect(authorized.scrapingAnt.paidEnabled).toBe(true);
+
+    const invalid = parseRetrievalConfiguration({
+      SCRAPINGANT_API_KEY: 'key',
+      SCRAPINGANT_ENABLED: 'true',
+      SCRAPINGANT_ALLOW_AUTHORIZED_CORPUS: 'true',
+      SCRAPINGANT_AUTHORIZED_CORPUS_PLATFORMS: 'not-a-platform'
+    });
+    expect(invalid.scrapingAnt.authorizedCorpusAllowed).toBe(true);
+    expect(invalid.scrapingAnt.authorizedCorpusPlatforms).toEqual([]);
+    expect(invalid.scrapingAnt.paidEnabled).toBe(true);
+    expect(invalid.warnings.join(' ')).toMatch(/AUTHORIZED_CORPUS_PLATFORMS/i);
+  });
+
   it('falls back to five for an invalid discovery default and records a warning', () => {
     expect(parseRetrievalConfiguration({ ACCESS_DISCOVERY_MAX_ITEMS: '0' }).accessDiscoveryMaxItems).toBe(5);
     expect(parseRetrievalConfiguration({ ACCESS_DISCOVERY_MAX_ITEMS: '-1' }).accessDiscoveryMaxItems).toBe(5);

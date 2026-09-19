@@ -212,7 +212,7 @@ export function sanitizeParams(params: Record<string, any>): Record<string, any>
  */
 export function sanitizeSensitiveText(value: unknown): string {
   return String(value)
-    .replace(/([?&](?:x[-_]?api[-_]?key|api[-_]?key|apikey|token|secret|auth|key|session|jwt|sso|saml)=)[^&#\s"'},;\]]*/gi, '$1***')
+    .replace(/([?&](?:x[-_]?api[-_]?key|api[-_]?key|apikey|token|secret|auth|key|session|jwt|sso|saml|signature|sig|credential|private|password|passcode)=)[^&#\s"'},;\]]*/gi, '$1***')
     .replace(/((?:["']?(?:cookie|set[-_]?cookie)["']?\s*[:=]\s*))(?:"[^"]*"|'[^']*'|[^,\r\n}]+)/gi, (match, prefix) => {
       const value = match.slice(prefix.length).trimStart();
       const quote = value[0] === '"' || value[0] === "'" ? value[0] : '';
@@ -223,7 +223,7 @@ export function sanitizeSensitiveText(value: unknown): string {
       const quote = value[0] === '"' || value[0] === "'" ? value[0] : '';
       return `${prefix}${quote}***${quote}`;
     })
-    .replace(/((?:["']?(?:x[-_]?api[-_]?key|api[-_]?key|apikey|auth|session|jwt|sso|saml|token|secret)["']?)\s*[:=]\s*["']?)[^\s,;}"']+/gi, '$1***')
+    .replace(/((?:["']?(?:x[-_]?api[-_]?key|api[-_]?key|apikey|auth|session|jwt|sso|saml|token|secret|signature|sig|credential|private|password|passcode|client[-_]?secret|refresh[-_]?token|access[-_]?token|proxy[-_]?authorization|private[-_]?key)["']?)\s*[:=]\s*["']?)[^\s,;}"']+/gi, '$1***')
     .replace(/((?:https?|socks\d?):\/\/)[^/\s@]+@/gi, '$1***@')
     .replace(/\b(Bearer|Basic)\s+[^\s,;}"'\\]+/gi, '$1 ***');
 }

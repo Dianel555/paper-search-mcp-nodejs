@@ -15,7 +15,9 @@ export type RetrievalPurpose =
 
 export type RetrievalStrategy = 'direct' | 'static' | 'browser';
 export type RetrievalProxyType = 'datacenter' | 'residential';
-export type RetrievalDocumentFormat = 'html' | 'html_with_iframes';
+export type RetrievalDocumentFormat = 'html' | 'html_with_iframes' | 'markdown';
+export type RetrievalTransportProfile = 'scholar_session' | 'public_landing' | 'pdf_download';
+export type RetrievalEntrypointProfile = 'search_scihub' | 'legacy_download' | 'public_download' | 'markdown';
 export type RetrievalProviderName = string;
 
 export type RetrievalCombinationId =
@@ -43,6 +45,10 @@ export interface RetrievalRequest {
   /** Omitted legacy requests normalize to the datacenter category. */
   readonly proxyType?: RetrievalProxyType;
   readonly documentFormat: RetrievalDocumentFormat;
+  /** Internal finite transport selection; never accepted from MCP arguments. */
+  readonly transportProfile?: RetrievalTransportProfile;
+  /** Internal entrypoint identity; never accepted from MCP arguments. */
+  readonly entrypointProfile?: RetrievalEntrypointProfile;
   /** Internal query values for a business retrieval, never transport headers. */
   readonly query?: Readonly<Record<string, string | number | boolean>>;
   readonly signal?: AbortSignal;
@@ -59,6 +65,7 @@ export interface RetrievalCapabilities {
   readonly html: boolean;
   readonly iframeDocuments: boolean;
   readonly pdfCandidates: boolean;
+  readonly markdown?: boolean;
   readonly browser: boolean;
   readonly paid: boolean;
   /**
@@ -120,8 +127,10 @@ export interface FiniteIframeDocument {
 }
 
 export interface FiniteDocument {
-  readonly kind: 'html';
+  readonly kind: 'html' | 'markdown';
+  /** HTML is empty for a Markdown document; HTML consumers must check kind. */
   readonly html: string;
+  readonly markdown?: string;
   readonly iframes: readonly FiniteIframeDocument[];
   readonly source: DocumentProvenance;
   readonly targetStatus?: number;

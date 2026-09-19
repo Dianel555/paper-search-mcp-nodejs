@@ -1,9 +1,10 @@
 import type { Searchers } from './searchers.js';
-import { handleToolCall, retrievalPurposeForToolCall } from './handleToolCall.js';
+import { handleToolCall, preflightPublicToolCall, retrievalPurposeForToolCall } from './handleToolCall.js';
 import { parseToolArgs, type ToolName } from './schemas.js';
 import { initializeSearchers } from './searchers.js';
 import { logDebug } from '../utils/Logger.js';
 import { sanitizeSensitiveText } from '../utils/SecurityUtils.js';
+import { ScholarReferenceCache } from './ScholarReferenceCache.js';
 
 export interface McpCallToolRequest {
   readonly params: {
@@ -17,10 +18,16 @@ export interface McpRequestExtra {
 }
 
 /** The same callback shape registered by the stdio MCP server. */
+export interface McpCallToolHandler {
+  (request: McpCallToolRequest, extra: McpRequestExtra): Promise<any>;
+  dispose(): void;
+}
+
 export function createCallToolHandler(
   searcherFactory: () => Searchers = initializeSearchers
-): (request: McpCallToolRequest, extra: McpRequestExtra) => Promise<any> {
-  return async (request, extra) => {
+): McpCallToolHandler {
+  const scholarReferenceCache = new ScholarReferenceCache();
+  const handler = async (request: McpCallToolRequest, extra: McpRequestExtra) => {
     const { name, arguments: args } = request.params;
     logDebug(`Received tools/call request: ${name}`);
 
@@ -28,13 +35,17 @@ export function createCallToolHandler(
       // Parse first so malformed tool input cannot create a retrieval
       // operation or reach any business/provider boundary.
       const parsedArgs = parseToolArgs(name as ToolName, args);
+      const preflight = await preflightPublicToolCall(name as ToolName, parsedArgs, scholarReferenceCache);
+      if (preflight) return preflight;
       const currentSearchers = searcherFactory();
       const operation = currentSearchers.retrievalService.createOperation({
         signal: extra.signal,
         purpose: retrievalPurposeForToolCall(name as ToolName, parsedArgs)
       });
       try {
-        return await handleToolCall(name, parsedArgs, currentSearchers, operation);
+        return await handleToolCall(name, parsedArgs, currentSearchers, operation, {
+          scholarReferenceCache
+        });
       } finally {
         operation.dispose();
       }
@@ -51,6 +62,8 @@ export function createCallToolHandler(
       };
     }
   };
+  handler.dispose = () => scholarReferenceCache.dispose();
+  return handler;
 }
 
 export default createCallToolHandler;

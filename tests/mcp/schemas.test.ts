@@ -84,6 +84,39 @@ describe('parseToolArgs', () => {
     });
   });
 
+  describe('public paper tools', () => {
+    it('strictly parses and normalizes DOI-backed download and markdown inputs', () => {
+      expect(parseToolArgs('download_public_paper', {
+        platform: 'publisher',
+        paperId: 'doi:10.1000/Test',
+        savePath: 'sub'
+      })).toEqual({ platform: 'publisher', paperId: '10.1000/Test', savePath: 'sub' });
+      expect(parseToolArgs('get_paper_markdown', {
+        platform: 'scihub',
+        paperId: 'https://doi.org/10.1000/Test'
+      })).toEqual({ platform: 'scihub', paperId: '10.1000/Test' });
+      expect(parseToolArgs('download_public_paper', {
+        platform: 'googlescholar',
+        paperId: 'gs_abc_123'
+      })).toEqual({ platform: 'googlescholar', paperId: 'gs_abc_123', savePath: './downloads' });
+    });
+
+    it('rejects unknown fields, arbitrary URLs, and invalid platform references', () => {
+      expect(() => parseToolArgs('download_public_paper', {
+        platform: 'publisher', paperId: '10.1000/test', provider: 'scrapingant'
+      })).toThrow();
+      expect(() => parseToolArgs('get_paper_markdown', {
+        platform: 'publisher', paperId: 'https://publisher.example/article'
+      })).toThrow(/DOI/i);
+      expect(() => parseToolArgs('download_public_paper', {
+        platform: 'googlescholar', paperId: 'https://publisher.example/article'
+      })).toThrow();
+      expect(() => parseToolArgs('get_paper_markdown', {
+        platform: 'publisher', paperId: '10.1000/test', savePath: './downloads'
+      })).toThrow();
+    });
+  });
+
   describe('get_citations', () => {
     it('should require a DOI', () => {
       expect(() => parseToolArgs('get_citations', {})).toThrow();

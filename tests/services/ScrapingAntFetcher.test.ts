@@ -45,6 +45,28 @@ describe('ScrapingAntFetcher', () => {
     expect(over.getStatus()).toEqual(expect.objectContaining({ creditsUsed: 2, requestCount: 1 }));
   });
 
+  it('supports the explicit static Markdown endpoint without exposing extended fields', async () => {
+    const request = jest.fn(async (_config: any) => ({
+      status: 200,
+      headers: { 'Ant-credits-cost': '2', 'Ant-page-status-code': '200' },
+      data: {
+        markdown: '# Markdown',
+        status_code: 200,
+        cookies: 'session=secret',
+        headers: [{ name: 'Set-Cookie', value: 'secret' }],
+        xhrs: [{ url: 'https://attacker.example/xhr' }]
+      }
+    }));
+    const fetcher = new ScrapingAntFetcher({ apiKey: 'test-api-key', client: { request }, validateUrl });
+    const result = await fetcher.fetch('https://example.com/page', { endpoint: 'markdown' });
+
+    expect(result).toMatchObject({ markdown: '# Markdown', apiStatus: 200, pageStatus: 200, creditsCost: 2 });
+    expect(result.html).toBe('');
+    expect(result.headers).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('session=secret');
+    expect((request.mock.calls[0][0] as any).url).toBe('https://api.scrapingant.com/v2/markdown');
+  });
+
   it('separates API/page status, supports html/content and accumulates actual credits', async () => {
     const request = jest.fn(async (_config: any) => ({
       status: 200,

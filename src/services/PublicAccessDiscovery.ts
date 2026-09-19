@@ -60,6 +60,7 @@ export interface AccessDiscoveryStatus {
   readonly landingUrl?: string;
   readonly landingHost?: string;
   readonly candidateUrl?: string;
+  readonly candidateUrls?: readonly string[];
   readonly method?: AccessArtifact['method'];
   readonly evidence?: AccessDiscoveryEvidence;
   readonly verification?: AccessDiscoveryVerification;
@@ -128,6 +129,8 @@ export interface PublicAccessDiscoveryService {
     readonly browserAllowed: boolean;
     readonly residentialAllowed?: boolean;
     readonly availableProxyTypes?: readonly ('datacenter' | 'residential')[];
+    readonly authorizedCorpusAllowed?: boolean;
+    readonly authorizedCorpusPlatforms?: readonly string[];
   };
 }
 
@@ -154,6 +157,7 @@ interface CandidateRecord {
 
 interface CandidateEvaluation {
   readonly artifact?: AccessArtifact;
+  readonly artifacts: readonly AccessArtifact[];
   readonly candidateCount: number;
   readonly candidatesTruncated: boolean;
 }
@@ -272,6 +276,22 @@ export class PublicAccessDiscovery {
       configuration,
       securityPolicy: this.securityPolicy
     });
+  }
+
+  async resolvePublisherTarget(
+    doi: string,
+    operation: RetrievalOperationContext
+  ): Promise<{ readonly url: string; readonly status?: number }> {
+    const result = await this.resolveDoi(doi, operation, operation.signal);
+    if (!result.leftResolver) {
+      throw new RetrievalError({
+        code: 'target_unavailable',
+        message: 'DOI resolution did not establish a Publisher target',
+        targetStatus: result.targetStatus
+      });
+    }
+    await this.validateDiscoveryUrl(result.finalUrl, operation.signal);
+    return { url: result.finalUrl, ...(result.targetStatus === undefined ? {} : { status: result.targetStatus }) };
   }
 
   async enrich(
@@ -623,17 +643,26 @@ export class PublicAccessDiscovery {
       });
     }
     const landingUrl = landing.finalUrl;
+    const landingHost = new URL(landingUrl).hostname;
+    const baseStatus = { landingUrl, landingHost };
     if (landing.targetStatus === 429) {
       return this.outcome(this.status('failed', {
+        ...baseStatus,
         reason: 'target_rate_limited',
-        landingUrl,
-        landingHost: new URL(landingUrl).hostname,
         targetStatus: landing.targetStatus
       }));
     }
+    if (isHardPermissionTargetStatus(landing.targetStatus)) {
+      if (!this.canUseAuthorizedCorpus()) {
+        return this.outcome(this.status('restricted', {
+          ...baseStatus,
+          reason: 'restricted_target',
+          targetStatus: landing.targetStatus
+        }));
+      }
+      return this.tryPaidStrategies(landingUrl, operation, baseStatus, [], signal, strategyScopeId);
+    }
     await this.validateDiscoveryUrl(landingUrl, signal);
-    const landingHost = new URL(landingUrl).hostname;
-    const baseStatus = { landingUrl, landingHost };
     const observations: FallbackObservation[] = [];
 
     if (selectedStrategy) {
@@ -715,7 +744,12 @@ export class PublicAccessDiscovery {
     const directObservation: FallbackObservation = { phase: 'direct', response: directResponse, page: directPage };
     observations.push(directObservation);
     if (directPage.kind === 'candidate') return this.applyCandidate(directResponse, directPage.candidate!, baseStatus);
-    if (directPage.kind === 'restricted' || directPage.kind === 'rate_limited') return this.reduceFallbackOutcome(baseStatus, observations);
+    if (directPage.kind === 'restricted') {
+      return this.canUseAuthorizedCorpus()
+        ? this.tryPaidStrategies(landingUrl, operation, baseStatus, observations, signal, strategyScopeId)
+        : this.reduceFallbackOutcome(baseStatus, observations);
+    }
+    if (directPage.kind === 'rate_limited') return this.reduceFallbackOutcome(baseStatus, observations);
     if (directPage.kind === 'candidate_limit') return this.reduceFallbackOutcome(baseStatus, observations);
     if (directPage.kind === 'not_found') {
       return this.reduceFallbackOutcome(baseStatus, observations);
@@ -1015,9 +1049,10 @@ export class PublicAccessDiscovery {
     const candidatesTruncated = records.length > MAX_CANDIDATES;
     const recordsToEvaluate = records.slice(0, MAX_CANDIDATES);
     let firstSafe: AccessArtifact | undefined;
+    const safeArtifacts: AccessArtifact[] = [];
 
     for (const record of recordsToEvaluate) {
-      if (signal.aborted) return { candidateCount: records.length, candidatesTruncated };
+      if (signal.aborted) return { artifacts: safeArtifacts, candidateCount: records.length, candidatesTruncated };
       if (!record.validSyntax) continue;
       try {
         await this.validateDiscoveryUrl(record.artifact.url, signal);
@@ -1025,13 +1060,14 @@ export class PublicAccessDiscovery {
         if (signal.aborted || isAbortError(error)) throw error;
         continue;
       }
-      if (signal.aborted) return { candidateCount: records.length, candidatesTruncated };
-      firstSafe = record.artifact;
-      break;
+      if (signal.aborted) return { artifacts: safeArtifacts, candidateCount: records.length, candidatesTruncated };
+      firstSafe ||= record.artifact;
+      safeArtifacts.push(record.artifact);
     }
 
     return {
       artifact: firstSafe,
+      artifacts: safeArtifacts,
       candidateCount: records.length,
       candidatesTruncated
     };
@@ -1047,6 +1083,7 @@ export class PublicAccessDiscovery {
     return this.outcome(this.status('oa_candidate', {
       ...baseStatus,
       candidateUrl: artifact.url,
+      candidateUrls: evaluation.artifacts.map(candidate => candidate.url),
       method: artifact.method,
       evidence: artifact,
       candidatesTruncated: evaluation.candidatesTruncated,
@@ -1189,6 +1226,13 @@ export class PublicAccessDiscovery {
     return this.retrievalService.getProcessStatus().enabled;
   }
 
+  private canUseAuthorizedCorpus(): boolean {
+    const status = this.retrievalService.getProcessStatus();
+    return status.enabled
+      && status.authorizedCorpusAllowed === true
+      && status.authorizedCorpusPlatforms?.includes('publisher') === true;
+  }
+
   private canUseBrowserFallback(): boolean {
     const status = this.retrievalService.getProcessStatus();
     return status.enabled && status.browserAllowed;
@@ -1233,7 +1277,8 @@ export class PublicAccessDiscovery {
         : { targetStatus: page?.targetStatus ?? response.targetStatus }),
       ...(page?.candidate ? {
         candidateCount: page.candidate.candidateCount,
-        candidatesTruncated: page.candidate.candidatesTruncated
+        candidatesTruncated: page.candidate.candidatesTruncated,
+        candidateUrls: page.candidate.artifacts.map(candidate => candidate.url)
       } : {})
     };
   }
@@ -1255,6 +1300,15 @@ export class PublicAccessDiscovery {
       fetchedAt: new Date().toISOString()
     };
   }
+}
+
+/** Extract only finite, syntactically safe-looking PDF observations from HTML/iframe documents. */
+export function extractPublicAccessCandidates(document: FiniteDocument): readonly AccessArtifact[] {
+  if (document.kind !== 'html') return [];
+  return collectCandidates(document)
+    .filter(record => record.validSyntax)
+    .slice(0, MAX_CANDIDATES)
+    .map(record => record.artifact);
 }
 
 function collectCandidates(document: FiniteDocument): CandidateRecord[] {
@@ -1360,7 +1414,7 @@ function responseHasPermissionRestriction(response: RetrievalResponse): boolean 
   return isPermissionRestrictedPage(documentText(document), markup);
 }
 
-function isPermissionRestrictedPage(text: string, markup?: string): boolean {
+export function isPermissionRestrictedPage(text: string, markup?: string): boolean {
   const source = markup ? permissionContentText(markup) : text;
   return /(?:subscription\s+required|institutional\s+(?:access|login)|(?:behind\s+(?:a\s+)?paywall|paywall\s+(?:required|access|subscription))|purchase\s+(?:access|article)|full\s*text\s+(?:is\s+)?(?:unavailable|restricted)|institutional\s+subscription|member\s+access)/i.test(source)
     || /(?:please|you\s+must|must)\s+(?:sign|log)\s*in\b|(?:sign|log)\s*in\s+(?:to\s+(?:access|continue|view)|is\s+required|required)|(?:full\s*text|article|access)\s+(?:requires?|needs?)\s+(?:a\s+)?(?:sign\s*in|log\s*in|login)/i.test(source);
@@ -1507,6 +1561,7 @@ function cloneAccessDiscoveryStatus(status: AccessDiscoveryStatus): AccessDiscov
     ...(status.evidence
       ? { evidence: { ...status.evidence, source: { ...status.evidence.source } } }
       : {}),
+    ...(status.candidateUrls ? { candidateUrls: [...status.candidateUrls] } : {}),
     ...(status.verification ? { verification: { ...status.verification } } : {}),
     ...(status.fallback ? { fallback: { ...status.fallback } } : {})
   };
@@ -1707,6 +1762,10 @@ function isNonSwitchablePaidFailure(error: unknown, operation: RetrievalOperatio
   ].includes(error.code);
 }
 
+function isHardPermissionTargetStatus(status: number | undefined): boolean {
+  return status === 401 || status === 407 || status === 423;
+}
+
 function classifyProviderFailure(error: unknown): ProviderFailureClassification {
   if (error instanceof SensitiveOutboundTargetError || error instanceof RetrievalError && error.code === 'security') {
     return {
@@ -1722,6 +1781,7 @@ function classifyProviderFailure(error: unknown): ProviderFailureClassification 
       ...(error.targetStatus === undefined ? {} : { targetStatus: error.targetStatus })
     };
     if (error.targetStatus === 429) return { kind: 'failed', reason: 'target_rate_limited', ...details };
+    if (isHardPermissionTargetStatus(error.targetStatus)) return { kind: 'restricted', reason: 'restricted_target', ...details };
     if (error.code === 'auth_or_credits_unknown') return { kind: 'provider', reason: 'provider_auth_or_credits', ...details };
     if (error.code === 'budget') return { kind: 'provider', reason: 'paid_budget_unavailable', ...details };
     if (error.code === 'configuration' || error.code === 'cancelled' || error.code === 'timeout') {

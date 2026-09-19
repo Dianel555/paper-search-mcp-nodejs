@@ -7,7 +7,7 @@
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.3-blue.svg)
 
 ## 💖 赞助商
 
@@ -820,6 +820,15 @@ export NODE_ENV=development
 ### ScrapingAnt 公共抓取层
 
 ScrapingAnt 是可选的付费公共页面后备：仅配置 key 不会发起付费请求，必须设置 `SCRAPINGANT_ENABLED=true`；browser 和 residential 后备分别显式授权。当前 Scholar 的 `browser:datacenter` 优先顺序仍是待真实能力验证的临时策略，不代表供应商可用性；未启用 browser 时保持 static-first。未授权 residential 时 Publisher/Scholar 默认为每操作 50、每请求 10 credits；设置 `SCRAPINGANT_ALLOW_RESIDENTIAL=true` 后默认为 500/125。显式有效限制优先，但 residential dispatch 仍必须设置 `SCRAPINGANT_PROXY_TYPE=residential`，datacenter 上限不会发送 residential 流量。Google Scholar 使用通用 `/v2/general` HTML 接口而非专用 Scholar API，WoS DOI 发现和 Sci-Hub 后备使用 `/v2/extended`；绝不代理 Clarivate/WoS API。ScrapingAnt Proxy mode 不作为透明替代方案；`SCRAPINGANT_PROXY_TYPE` 只是 provider 的代理上限，`SCHOLAR_PROXY` 是独立的 Scholar 直连显式覆盖。DOI 发现会在本地可见的重定向链中先拒绝已知登录、SSO 和 Clarivate 目标。本地 DNS 校验无法证明远程代理自己的重定向目标安全，因此发现到的链接不是 OA、授权或版权结论；真实 credits 以响应头为准，本地预算不等于供应商账单余额。已知权限、安全、资源、取消或截止时间错误不会触发付费后备，已发送请求的费用缺失只记录为 unknown 并消费本地估算，不单独停止有界后备；完成的策略 scope 只保留有限缓存元数据，不保留原始 provider 文档。持续性的 Scholar 封锁仍属于供应商能力边界。
+
+### 公共论文与 Markdown 工具
+
+- `download_public_paper` 是独立且 strict 的 MCP 工具，仅支持 `publisher`、`googlescholar`、`scihub`。Publisher/Sci-Hub 的 `paperId` 是 DOI；Scholar 必须使用同一 MCP 连接搜索结果发布的短期引用。
+- `get_paper_markdown` 只有显式调用才启用，最多发送一次 static/datacenter `/v2/markdown` 请求，返回有界且不可信的 Markdown；Markdown 不会写入 Paper、提取 PDF 候选，也不会被搜索/发现/下载隐式调用。
+- Scholar 引用只保存在内存中，每个 handler 最多 256 条，TTL 300 秒且读取不续期；handler dispose/重启即失效。缺失、过期或歧义引用不会猜测 URL 或请求 provider。
+- 只有部署明确获准尝试受限页面时，才设置 `SCRAPINGANT_ALLOW_AUTHORIZED_CORPUS=true` 并配置 `SCRAPINGANT_AUTHORIZED_CORPUS_PLATFORMS` 的 canonical token。系统不会转发 Cookie、Authorization、机构凭据，也不接受 MCP 传入的任意 URL。
+- provider HTML/Markdown 不是 PDF 权威。新下载器会重新检查公网目标、MIME、`%PDF-`、大小、取消、路径、符号链接和原子 no-clobber 发布。现有 `download_paper` 的名称、八个平台 schema 和行为保持不变；不启用 Proxy mode 或 AI Extractor。
+- 离线测试和默认配置不会发送 live/paid 请求。live canary 必须另行批准样本、预算、停止条件和报告字段。
 
 ## 🔑 API密钥需求
 

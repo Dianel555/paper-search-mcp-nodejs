@@ -8,7 +8,7 @@ A Node.js Model Context Protocol (MCP) server for searching and downloading acad
 ![TypeScript](https://img.shields.io/badge/typescript-^5.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-14-brightgreen.svg)
-![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.3-blue.svg)
 
 ## 💖 Sponsors
 
@@ -835,6 +835,15 @@ export NODE_ENV=development
 ### ScrapingAnt Public Fetch Layer
 
 ScrapingAnt is an optional, paid public-page fallback: a key alone does not enable dispatch. Set `SCRAPINGANT_ENABLED=true` to opt in; browser and residential escalation are independent authorizations. The current Scholar `browser:datacenter`-first order is provisional and requires real provider capability validation; otherwise it retains static-first behavior. Without residential authorization, Publisher/Scholar defaults are 50 credits per operation and 10 credits per request; with `SCRAPINGANT_ALLOW_RESIDENTIAL=true`, their defaults become 500/125. Explicit valid limits always win, but residential dispatch still requires `SCRAPINGANT_PROXY_TYPE=residential`; a datacenter ceiling never sends residential traffic. Google Scholar uses the generic `/v2/general` HTML endpoint (not a dedicated Scholar API), while WoS DOI access discovery and Sci-Hub fallback use `/v2/extended`. The layer is never a Clarivate/WoS API proxy. DOI discovery rejects known login/SSO/Clarivate targets before dispatch where the local redirect chain is visible. Local DNS checks cannot prove the remote proxy's own redirect destination, so a discovered link is not an OA, authorization, or copyright determination. Actual usage is taken from response credit headers; local budgets are not provider billing balances. A known permission/security/resource/cancellation/deadline failure does not trigger paid fallback, and completed strategy scopes retain only finite cache metadata rather than raw provider documents. Persistent Scholar blocking remains an external provider limitation.
+
+### Public-paper and Markdown tools
+
+- `download_public_paper` is a separate, strict MCP tool for `publisher`, `googlescholar`, and `scihub`. Publisher/Sci-Hub use a DOI in `paperId`; Scholar uses a short-lived reference published by the same MCP connection's search result.
+- `get_paper_markdown` is explicit opt-in only. It makes at most one static/datacenter `/v2/markdown` request and returns bounded, untrusted Markdown; Markdown is never used for Paper fields, PDF candidate extraction, or implicit search/download calls.
+- Scholar references are in-memory only, capped at 256 entries per handler, TTL 300 seconds, non-sliding, and invalidated on handler disposal/restart. Missing, expired, or ambiguous references do not guess a URL or make a provider request.
+- Set `SCRAPINGANT_ALLOW_AUTHORIZED_CORPUS=true` plus canonical tokens in `SCRAPINGANT_AUTHORIZED_CORPUS_PLATFORMS` only when a deployment is authorized to attempt restricted pages. This does not forward cookies, Authorization headers, institutional credentials, or MCP-supplied URLs.
+- Provider HTML/Markdown is not a PDF authority. The new downloader re-checks public targets, MIME, `%PDF-`, size, cancellation, paths, symlinks, and atomic no-clobber publication. Existing `download_paper` keeps its name, eight-platform schema, and behavior; no Proxy mode or AI Extractor is enabled.
+- Offline tests and the default configuration do not send live or paid requests. Live canaries require separate approval, budget, samples, and stop conditions.
 
 ### Sci-Hub Features
 

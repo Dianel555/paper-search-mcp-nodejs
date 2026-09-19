@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { sanitizeDoi } from '../utils/SecurityUtils.js';
+import { PUBLIC_PAPER_PLATFORMS, type PublicPaperPlatform } from './publicPaperContracts.js';
 
 const SortBySchema = z.enum(['relevance', 'date', 'citations']);
 const SortOrderSchema = z.enum(['asc', 'desc']);
@@ -137,6 +138,26 @@ export const DownloadPaperSchema = z
   })
   .strip();
 
+const PublicPaperPlatformSchema = z.enum(PUBLIC_PAPER_PLATFORMS);
+const PublicPaperIdSchema = z.string().trim().min(1).max(256);
+
+export const DownloadPublicPaperSchema = z
+  .object({
+    platform: PublicPaperPlatformSchema,
+    paperId: PublicPaperIdSchema,
+    savePath: z.string().optional().default('./downloads')
+  })
+  .strict()
+  .superRefine(validatePublicPaperReference);
+
+export const GetPaperMarkdownSchema = z
+  .object({
+    platform: PublicPaperPlatformSchema,
+    paperId: PublicPaperIdSchema
+  })
+  .strict()
+  .superRefine(validatePublicPaperReference);
+
 export const SearchGoogleScholarSchema = z
   .object({
     query: z.string().min(1),
@@ -242,7 +263,7 @@ export const GetCitationsSchema = z
   })
   .strip();
 
-function isDoiOnlyInput(value: string): boolean {
+export function isDoiOnlyInput(value: string): boolean {
   const trimmed = value.trim();
   if (/^https?:\/\//i.test(trimmed)) {
     try {
@@ -258,6 +279,38 @@ function isDoiOnlyInput(value: string): boolean {
   return sanitizeDoi(trimmed).valid;
 }
 
+function validatePublicPaperReference(
+  value: { platform: PublicPaperPlatform; paperId: string },
+  context: z.RefinementCtx
+): void {
+  if (value.platform === 'googlescholar') {
+    if (!isScholarReferenceInput(value.paperId)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['paperId'], message: 'Google Scholar paperId must be an opaque session reference' });
+    }
+    return;
+  }
+  if (!isDoiOnlyInput(value.paperId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['paperId'], message: 'Publisher and Sci-Hub paperId must contain only a DOI' });
+  }
+}
+
+function isScholarReferenceInput(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)
+    && !/^https?:\/\//i.test(value)
+    && !/[\\/?#@]/.test(value);
+}
+
+function normalizePublicPaperArgs(
+  value: { platform: PublicPaperPlatform; paperId: string; savePath?: string }
+): { platform: PublicPaperPlatform; paperId: string; savePath?: string } {
+  if (value.platform === 'googlescholar') {
+    return { ...value, paperId: value.paperId.trim() };
+  }
+  const normalized = sanitizeDoi(value.paperId);
+  if (!normalized.valid) throw new Error('Invalid DOI format');
+  return { ...value, paperId: normalized.sanitized };
+}
+
 export type ToolName =
   | 'search_papers'
   | 'search_arxiv'
@@ -269,6 +322,8 @@ export type ToolName =
   | 'search_semantic_scholar'
   | 'search_iacr'
   | 'download_paper'
+  | 'download_public_paper'
+  | 'get_paper_markdown'
   | 'search_google_scholar'
   | 'get_paper_by_doi'
   | 'discover_paper_access'
@@ -303,6 +358,14 @@ export function parseToolArgs(toolName: ToolName, args: unknown): any {
       return SearchIACRSchema.parse(args);
     case 'download_paper':
       return DownloadPaperSchema.parse(args);
+    case 'download_public_paper': {
+      const parsed = DownloadPublicPaperSchema.parse(args);
+      return normalizePublicPaperArgs(parsed);
+    }
+    case 'get_paper_markdown': {
+      const parsed = GetPaperMarkdownSchema.parse(args);
+      return normalizePublicPaperArgs(parsed);
+    }
     case 'search_google_scholar':
       return SearchGoogleScholarSchema.parse(args);
     case 'get_paper_by_doi':

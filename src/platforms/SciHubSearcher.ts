@@ -13,7 +13,7 @@ import { isIP } from 'node:net';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createConcurrencyLimiter } from '../utils/ConcurrencyLimiter.js';
-import { PaperSource, type SearchOptions, type DownloadOptions, type PlatformCapabilities } from './PaperSource.js';
+import { PaperSource, type SearchOptions, type DownloadOptions, type PlatformCapabilities, type SciHubEntrypointProfile } from './PaperSource.js';
 import { Paper, PaperFactory } from '../models/Paper.js';
 import { CapabilityUnavailableError } from '../utils/CapabilityErrors.js';
 import { sanitizeDoi, sanitizeDownloadPath, sanitizeFilename } from '../utils/SecurityUtils.js';
@@ -72,9 +72,14 @@ export interface SciHubRetrievalService {
   retrieveWithStrategies(
     steps: readonly RetrievalStrategyStep[],
     context?: RetrievalOperationContext,
-    options?: { maxPaidStrategySelections?: number; maxBrowserDispatches?: number }
+    options?: { maxPaidStrategySelections?: number; maxBrowserDispatches?: number; scopeId?: string }
   ): Promise<RetrievalResponse>;
-  getProcessStatus(): { enabled: boolean; browserAllowed: boolean };
+  getProcessStatus(): {
+    enabled: boolean;
+    browserAllowed: boolean;
+    authorizedCorpusAllowed?: boolean;
+    authorizedCorpusPlatforms?: readonly string[];
+  };
 }
 
 export interface SciHubSearcherOptions {
@@ -305,13 +310,13 @@ export class SciHubSearcher extends PaperSource {
   async search(query: string, options?: SearchOptions): Promise<Paper[]> {
     this.requireEnabled();
     const doi = normalizeSciHubInput(query);
-    const paper = await this.fetchPaperInfo(doi, options?.operationContext);
+    const paper = await this.fetchPaperInfo(doi, options?.operationContext, options?.entrypointProfile || 'search_scihub');
     return paper ? [paper] : [];
   }
 
   async getPaperByDoi(doi: string, options?: SearchOptions): Promise<Paper | null> {
     this.requireEnabled();
-    return this.fetchPaperInfo(normalizeSciHubInput(doi), options?.operationContext);
+    return this.fetchPaperInfo(normalizeSciHubInput(doi), options?.operationContext, options?.entrypointProfile || 'search_scihub');
   }
 
   async downloadPdf(paperId: string, options?: DownloadOptions): Promise<string> {
@@ -350,8 +355,12 @@ export class SciHubSearcher extends PaperSource {
       }
     }
 
-    const cachedPdf = this.operationPdfCache.get(operation as object)?.get(doi);
-    const paper = cachedPdf ? { pdfUrl: cachedPdf } as Paper : await this.fetchPaperInfo(doi, operation);
+    const entrypointProfile = options?.entrypointProfile || 'legacy_download';
+    const cachedPdf = this.operationPdfCache.get(operation as object)?.get(pdfCacheKey(entrypointProfile, doi))
+      || (entrypointProfile === 'legacy_download'
+        ? this.operationPdfCache.get(operation as object)?.get(pdfCacheKey('search_scihub', doi))
+        : undefined);
+    const paper = cachedPdf ? { pdfUrl: cachedPdf } as Paper : await this.fetchPaperInfo(doi, operation, entrypointProfile);
     if (operation.signal.aborted || operation.remainingMs() <= 0) throwIfOperationUnavailable(operation);
     if (!paper?.pdfUrl) {
       throw new Error(`Cannot find a PDF for DOI (lookup status: ${this.lastLookupStatus})`);
@@ -445,6 +454,16 @@ export class SciHubSearcher extends PaperSource {
     }
   }
 
+  async resolvePublicTarget(paperId: string, operation: RetrievalOperationContext): Promise<string> {
+    this.requireEnabled();
+    throwIfOperationUnavailable(operation);
+    const doi = normalizeSciHubInput(paperId);
+    const mirrors = await this.getCandidateMirrors(operation.signal);
+    const mirror = mirrors[0];
+    if (!mirror) throw new RetrievalError({ code: 'target_unavailable', message: 'No Sci-Hub mirror is available' });
+    return buildMirrorLandingUrl(mirror.url, doi);
+  }
+
   async readPaper(paperId: string, options?: DownloadOptions): Promise<string> {
     const filePath = await this.downloadPdf(paperId, options);
     return `PDF downloaded to: ${filePath}. Please use a PDF reader to view the content.`;
@@ -489,22 +508,30 @@ export class SciHubSearcher extends PaperSource {
     return 'Compliance notice: use Sci-Hub only for public content or material you are legally authorized to access; this adapter does not grant access rights.';
   }
 
-  private async fetchPaperInfo(doi: string, operationContext?: RetrievalOperationContext): Promise<Paper | null> {
+  private async fetchPaperInfo(
+    doi: string,
+    operationContext?: RetrievalOperationContext,
+    entrypointProfile: SciHubEntrypointProfile = 'search_scihub'
+  ): Promise<Paper | null> {
     const suppliedOperation = operationContext;
     const ownedOperation = suppliedOperation ? undefined : this.retrievalService.createOperation({ purpose: 'scihub_lookup' });
     const operation = suppliedOperation || ownedOperation!;
     try {
-      return await this.fetchPaperInfoWithRetrieval(doi, operation);
+      return await this.fetchPaperInfoWithRetrieval(doi, operation, entrypointProfile);
     } finally {
       ownedOperation?.dispose?.();
     }
   }
 
-  private async fetchPaperInfoWithRetrieval(doi: string, operation: RetrievalOperationContext): Promise<Paper | null> {
+  private async fetchPaperInfoWithRetrieval(
+    doi: string,
+    operation: RetrievalOperationContext,
+    entrypointProfile: SciHubEntrypointProfile
+  ): Promise<Paper | null> {
     const mirrors = await this.getCandidateMirrors(operation.signal);
     for (const mirror of mirrors) {
       if (operation.signal.aborted) return null;
-      const outcome = await this.lookupWithRetrieval(mirror.url, doi, operation);
+      const outcome = await this.lookupWithRetrieval(mirror.url, doi, operation, entrypointProfile);
       this.lastLookupStatus = outcome.status;
       if (operation.signal.aborted || operation.remainingMs() <= 0 || outcome.terminal) return null;
       if (outcome.paper) {
@@ -514,7 +541,7 @@ export class SciHubSearcher extends PaperSource {
             cached = new Map<string, string>();
             this.operationPdfCache.set(operation as object, cached);
           }
-          cached.set(doi, outcome.paper.pdfUrl);
+          cached.set(pdfCacheKey(entrypointProfile, doi), outcome.paper.pdfUrl);
         }
         this.lastSuccessfulMirror = mirror.url;
         mirror.status = 'working';
@@ -529,14 +556,17 @@ export class SciHubSearcher extends PaperSource {
   private async lookupWithRetrieval(
     mirrorUrl: string,
     doi: string,
-    operation: RetrievalOperationContext
+    operation: RetrievalOperationContext,
+    entrypointProfile: SciHubEntrypointProfile
   ): Promise<LookupOutcome> {
     const landingUrl = buildMirrorLandingUrl(mirrorUrl, doi);
+    const paidEnabled = this.retrievalService.getProcessStatus().enabled;
     const request = (strategy: 'direct' | 'static' | 'browser') => ({
       url: landingUrl,
       purpose: 'scihub_lookup' as const,
       strategy,
       documentFormat: 'html_with_iframes' as const,
+      entrypointProfile,
       signal: operation.signal
     });
     const steps: RetrievalStrategyStep[] = this.fetchMode === 'direct'
@@ -545,25 +575,26 @@ export class SciHubSearcher extends PaperSource {
         {
           request: request('direct'),
           retryResponse: response => this.shouldRetryDirectResponse(response),
-          isTerminalResponse: async response => !(await this.needsSciHubFallback(response, operation.signal)),
+          isTerminalResponse: async response => !(await this.needsSciHubFallback(response, operation.signal, entrypointProfile)),
           continueOnError: error => isSciHubFallbackError(error)
         },
         {
           request: request('static'),
-          shouldAttempt: async state => await this.needsSciHubFallback(state.previousResponse, operation.signal)
-            || isSciHubFallbackError(state.previousError),
+          shouldAttempt: async state => paidEnabled && (await this.needsSciHubFallback(state.previousResponse, operation.signal, entrypointProfile)
+            || isSciHubFallbackError(state.previousError)),
           isTerminalResponse: async response => !(await this.needsSciHubBrowser(response, operation.signal))
         },
         {
           request: request('browser'),
-          shouldAttempt: async state => await this.needsSciHubBrowser(state.previousResponse, operation.signal)
+          shouldAttempt: async state => paidEnabled && await this.needsSciHubBrowser(state.previousResponse, operation.signal)
         }
       ];
 
     try {
       const response = await this.retrievalService.retrieveWithStrategies(steps, operation, {
         maxPaidStrategySelections: 3,
-        maxBrowserDispatches: 1
+        maxBrowserDispatches: 1,
+        scopeId: `${entrypointProfile}:${doi}`
       });
       return await this.classifyRetrievalLookup(response, doi, landingUrl, mirrorUrl, operation);
     } catch (error) {
@@ -641,25 +672,35 @@ export class SciHubSearcher extends PaperSource {
     return !looksRestricted(documentHtml);
   }
 
-  private async needsSciHubFallback(response: RetrievalResponse | undefined, signal: AbortSignal): Promise<boolean> {
+  private async needsSciHubFallback(
+    response: RetrievalResponse | undefined,
+    signal: AbortSignal,
+    entrypointProfile: SciHubEntrypointProfile
+  ): Promise<boolean> {
     if (!response || signal.aborted) return false;
     const status = response.targetStatus ?? response.document?.targetStatus;
     const documentHtml = response.document
       ? [response.document.html, ...response.document.iframes.map(frame => frame.html)].join('\n')
       : '';
-    if (status === 401 || status === 403 || status === 407 || status === 429 || status === 404 || status === 410 || status === 423) return false;
-    if (looksRestricted(documentHtml)) return false;
+    const authorized = entrypointProfile !== 'legacy_download'
+      && this.retrievalService.getProcessStatus().authorizedCorpusAllowed === true
+      && this.retrievalService.getProcessStatus().authorizedCorpusPlatforms?.includes('scihub') === true;
+    if (status === 401 || status === 407 || status === 429 || status === 423) return false;
+    const publicProfile = entrypointProfile !== 'legacy_download';
+    if (status === 403 && (!authorized || !publicProfile)) return false;
+    if (status === 404 || status === 410) return publicProfile;
+    if (looksRestricted(documentHtml)) return authorized && publicProfile;
     if (status === undefined) return false;
-    if (status < 200 || status >= 300) return status >= 500;
-    if (looksNotFound(documentHtml)) return false;
+    if (status < 200 || status >= 300) return status >= 500 && publicProfile;
+    if (looksNotFound(documentHtml)) return publicProfile;
     let approvedDynamic = false;
     if (response.document && this.hasPotentialDynamicShape(response.document)) {
       approvedDynamic = await this.hasApprovedDynamicShape(response.document, signal);
       if (!approvedDynamic) return false;
     }
-    return !hasPdfEvidence(response)
-      && !looksBlocked(documentHtml)
-      && (hasDynamicContainer(documentHtml) || approvedDynamic);
+    return publicProfile
+      ? !hasPdfEvidence(response)
+      : !hasPdfEvidence(response) && !looksBlocked(documentHtml) && (hasDynamicContainer(documentHtml) || approvedDynamic);
   }
 
   private async needsSciHubBrowser(response: RetrievalResponse | undefined, signal: AbortSignal): Promise<boolean> {
@@ -667,7 +708,7 @@ export class SciHubSearcher extends PaperSource {
     const status = response.targetStatus ?? response.document?.targetStatus;
     if (status === undefined || status < 200 || status >= 300 || !response.document) return false;
     const documentHtml = [response.document.html, ...response.document.iframes.map(frame => frame.html)].join('\n');
-    if (looksNotFound(documentHtml) || hasPdfEvidence(response) || looksBlocked(documentHtml)) return false;
+    if (looksNotFound(documentHtml) || hasPdfEvidence(response) || looksBlocked(documentHtml) || looksRestricted(documentHtml)) return false;
     return this.hasApprovedDynamicShape(response.document, signal);
   }
 
@@ -1085,6 +1126,11 @@ function isMirrorHealthRelevantError(error: unknown): boolean {
   if (!(error instanceof RetrievalError)) return false;
   if (error.provider && error.provider !== 'direct') return false;
   return ['network', 'server_error', 'timeout'].includes(error.code);
+}
+
+function pdfCacheKey(profile: SciHubEntrypointProfile, doi: string): string {
+  const stableProfile = profile === 'public_download' || profile === 'markdown' ? profile : 'legacy-search';
+  return `${stableProfile}\u0000${doi}`;
 }
 
 function buildMirrorLandingUrl(mirror: string, doi: string): string {

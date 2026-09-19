@@ -99,8 +99,11 @@ export interface RetrievalProcessStatus {
     readonly directHtml: boolean;
     readonly scrapingAntHtml: boolean;
     readonly iframeDocuments: boolean;
+    readonly markdown: boolean;
     readonly browser: boolean;
   };
+  readonly authorizedCorpusAllowed: boolean;
+  readonly authorizedCorpusPlatforms: readonly string[];
   readonly budgetDefaults: {
     readonly maxCreditsPerOperation: number;
     readonly maxCreditsPerRequest: number;
@@ -139,19 +142,20 @@ interface OperationMetadata {
 }
 
 interface StrategyScope {
-  /** Number of distinct paid combinations selected in this business scope. */
+  /** Number of distinct paid target/combination selections in this business scope. */
   paidStrategySelections: number;
   /** Actual browser dispatches, not retry wrappers or reservations. */
   browserDispatches: number;
   pendingBrowserDispatches: number;
   selectionTokens: Map<string, StrategySelectionState>;
-  combinations: Map<RetrievalCombinationId, CombinationState>;
-  completed: Map<RetrievalCombinationId, StrategyOutcome>;
-  flights: Map<RetrievalCombinationId, StrategyFlight>;
+  /** Dispatch ceilings are target-specific; paid selection count remains scope-wide. */
+  combinations: Map<string, CombinationState>;
+  completed: Map<string, StrategyOutcome>;
+  flights: Map<string, StrategyFlight>;
 }
 
 interface StrategySelectionState {
-  readonly combinationId: RetrievalCombinationId;
+  readonly combinationKey: string;
   readonly newlySelected: boolean;
   dispatched: boolean;
 }
@@ -364,13 +368,18 @@ export class RetrievalService {
       validateCapability(provider, normalizedRequest);
       const scope = this.strategyCounters(this.metadataFor(operation), scopeId);
       const combinationId = normalizedRequest.combination.id;
-      const completed = scope.completed.get(combinationId);
+      // Admission counters are scope-wide, while completed responses and
+      // in-flight sharing are target-specific. This prevents a failed or
+      // successful Sci-Hub mirror from poisoning a different mirror without
+      // resetting the shared strategy/budget ceiling.
+      const responseKey = strategyResponseKey(combinationId, request.url);
+      const completed = scope.completed.get(responseKey);
       if (completed) {
         if (completed.error) throw completed.error;
         if (completed.response) return completed.response;
       }
 
-      let flight = scope.flights.get(combinationId);
+      let flight = scope.flights.get(responseKey);
       if (!flight) {
         const controller = new AbortController();
         flight = {
@@ -381,7 +390,7 @@ export class RetrievalService {
           waiters: 0,
           settled: false
         };
-        scope.flights.set(combinationId, flight);
+        scope.flights.set(responseKey, flight);
         const sharedRequest: RetrievalRequest = { ...request, signal: controller.signal };
         flight.promise = this.executeRetryLoop(
           sharedRequest,
@@ -394,15 +403,15 @@ export class RetrievalService {
           // Strategy re-entry only needs the finite provider/status/cost
           // snapshot. Do not retain provider HTML or iframe bodies in the
           // operation scope after the current waiter has consumed them.
-          scope.completed.set(combinationId, { response: compactCachedResponse(response) });
+          scope.completed.set(responseKey, { response: compactCachedResponse(response) });
           return response;
         }).catch(error => {
           const safeError = this.normalizeError(error, operation);
-          scope.completed.set(combinationId, { error: safeError });
+          scope.completed.set(responseKey, { error: safeError });
           throw safeError;
         }).finally(() => {
           flight!.settled = true;
-          if (scope.flights.get(combinationId) === flight) scope.flights.delete(combinationId);
+          if (scope.flights.get(responseKey) === flight) scope.flights.delete(responseKey);
         });
       }
 
@@ -545,8 +554,11 @@ export class RetrievalService {
         directHtml: this.directProvider.capabilities.html,
         scrapingAntHtml: this.scrapingAntProvider?.capabilities.html || false,
         iframeDocuments: this.scrapingAntProvider?.capabilities.iframeDocuments || false,
+        markdown: this.scrapingAntProvider?.capabilities.markdown === true,
         browser: this.scrapingAntProvider?.capabilities.browser || false
       },
+      authorizedCorpusAllowed: this.configuration.scrapingAnt.authorizedCorpusAllowed,
+      authorizedCorpusPlatforms: [...this.configuration.scrapingAnt.authorizedCorpusPlatforms],
       budgetDefaults: {
         maxCreditsPerOperation: this.costPolicy.budget,
         maxCreditsPerRequest: this.costPolicy.maxCreditsPerRequest
@@ -980,13 +992,14 @@ export class RetrievalService {
     const metadata = this.metadataFor(context);
     const counters = this.strategyCounters(metadata, strategyScopeId);
     const combinationId = request.combination.id;
-    let combination = counters.combinations.get(combinationId);
+    const combinationKey = strategyResponseKey(combinationId, request.url);
+    let combination = counters.combinations.get(combinationKey);
     if (!combination) {
       if (counters.paidStrategySelections >= limits.maxPaidStrategySelections) {
         throw new RetrievalError({ code: 'budget', message: 'The retrieval strategy selection limit was reached' });
       }
       combination = { dispatches: 0, pendingDispatches: 0 };
-      counters.combinations.set(combinationId, combination);
+      counters.combinations.set(combinationKey, combination);
       counters.paidStrategySelections++;
     }
 
@@ -1001,7 +1014,7 @@ export class RetrievalService {
 
     const token = `retrieval-selection-${++this.strategySequence}`;
     counters.selectionTokens.set(token, {
-      combinationId,
+      combinationKey,
       newlySelected: combination.dispatches === 0 && combination.pendingDispatches === 0,
       dispatched: false
     });
@@ -1024,12 +1037,12 @@ export class RetrievalService {
     counters.selectionTokens.delete(token);
     if (selection.dispatched) return;
 
-    const combination = counters.combinations.get(selection.combinationId);
+    const combination = counters.combinations.get(selection.combinationKey);
     if (!combination) return;
     combination.pendingDispatches = Math.max(0, combination.pendingDispatches - 1);
     if (strategy === 'browser') counters.pendingBrowserDispatches = Math.max(0, counters.pendingBrowserDispatches - 1);
     if (combination.dispatches === 0 && combination.pendingDispatches === 0) {
-      counters.combinations.delete(selection.combinationId);
+      counters.combinations.delete(selection.combinationKey);
       counters.paidStrategySelections = Math.max(0, counters.paidStrategySelections - 1);
     }
   }
@@ -1071,7 +1084,7 @@ export class RetrievalService {
     if (request.strategy !== 'direct' && strategyToken) {
       const counters = this.strategyCounters(metadata, strategyScopeId);
       const selection = counters.selectionTokens.get(strategyToken);
-      const combination = counters.combinations.get(request.combination.id);
+      const combination = counters.combinations.get(strategyResponseKey(request.combination.id, request.url));
       if (selection && combination && !selection.dispatched) {
         selection.dispatched = true;
         combination.pendingDispatches = Math.max(0, combination.pendingDispatches - 1);
@@ -1261,6 +1274,9 @@ function validateCapability(provider: RetrievalProvider, request: NormalizedRetr
   if (request.documentFormat === 'html_with_iframes' && !capabilities.iframeDocuments && request.strategy !== 'direct') {
     throw new RetrievalError({ code: 'configuration', message: 'The selected provider does not return iframe documents', provider: provider.name });
   }
+  if (request.documentFormat === 'markdown' && capabilities.markdown !== true) {
+    throw new RetrievalError({ code: 'configuration', message: 'The selected provider does not return Markdown documents', provider: provider.name });
+  }
 }
 
 function compactCachedResponse(response: RetrievalResponse): RetrievalResponse {
@@ -1340,6 +1356,19 @@ function normalizeNonNegativeLimit(value: number | undefined, fallback: number):
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
+function strategyResponseKey(combination: RetrievalCombinationId, url: string): string {
+  let normalizedUrl = url;
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    parsed.hostname = parsed.hostname.toLowerCase();
+    normalizedUrl = parsed.toString();
+  } catch {
+    // The target validator owns malformed URL errors; retain a local key here.
+  }
+  return `${combination}\u0000${normalizedUrl}`;
+}
+
 function deriveStrategyScopeId(request: RetrievalRequest): string {
   let normalizedUrl = request.url;
   try {
@@ -1357,7 +1386,7 @@ function deriveStrategyScopeId(request: RetrievalRequest): string {
   const query = request.query
     ? JSON.stringify(Object.entries(request.query).sort(([left], [right]) => left.localeCompare(right)))
     : '';
-  return `${request.purpose}\u0000${normalizedUrl}\u0000${query}`;
+  return `${request.purpose}\u0000${request.entrypointProfile || ''}\u0000${normalizedUrl}\u0000${query}`;
 }
 
 function appendAttemptedCombination(

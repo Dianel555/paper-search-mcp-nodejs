@@ -999,6 +999,24 @@ describe('PublicAccessDiscovery', () => {
     expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'restricted' }));
   });
 
+  it('allows one bounded restricted-page provider attempt only with deployment authorization', async () => {
+    const direct = jest.fn(async () => response('direct', 'direct', '<p>Sign in to access the full text</p>'));
+    const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/authorized.pdf">PDF</a>'));
+    const base = configuration(true);
+    const authorized = {
+      ...base,
+      scrapingAnt: {
+        ...base.scrapingAnt,
+        authorizedCorpusAllowed: true,
+        authorizedCorpusPlatforms: ['publisher'] as const
+      }
+    };
+    const { discovery, paid: paidSpy } = makeDiscovery(direct, paid, authorized);
+    const [enriched] = await discovery.enrich([paper('10.1000/authorized')]);
+    expect(paidSpy).toHaveBeenCalledTimes(1);
+    expect(enriched.extra?.accessDiscovery).toEqual(expect.objectContaining({ status: 'oa_candidate' }));
+  });
+
   it('does not treat restricted pages or apparent PDF links as public access', async () => {
     const direct = jest.fn(async () => response('direct', 'direct', '<p>Sign in to access the full text</p><a href="/paper.pdf">PDF</a>'));
     const paid = jest.fn(async () => response('paid', 'static', '<a href="https://publisher.example/paid.pdf">PDF</a>'));

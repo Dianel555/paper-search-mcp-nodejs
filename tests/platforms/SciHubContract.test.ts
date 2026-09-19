@@ -1143,7 +1143,7 @@ describe('SciHub controlled adapter', () => {
     }
   });
 
-  it('uses neutral retrieval and does not retry a target not-found as a paid lookup', async () => {
+  it('uses neutral retrieval and permits one bounded public fallback for target not-found', async () => {
     const strategies: string[] = [];
     const service = fakeSciHubService(async (strategy) => {
       strategies.push(strategy);
@@ -1157,7 +1157,7 @@ describe('SciHub controlled adapter', () => {
     });
 
     await expect(searcher.search('10.1000/not-found')).resolves.toEqual([]);
-    expect(strategies).toEqual(['direct']);
+    expect(strategies).toEqual(['direct', 'static']);
   });
 
   it.each([423, 429])('keeps restricted target status %s on the direct path without crossing mirrors or paid fallback', async targetStatus => {
@@ -1203,7 +1203,9 @@ describe('SciHub controlled adapter', () => {
     });
 
     await expect(searcher.search(`10.1000/iframe-challenge-${targetStatus}`)).resolves.toEqual([]);
-    expect(strategies).toEqual(['direct']);
+    expect(strategies).toEqual(targetStatus === 404
+      ? ['direct', 'static']
+      : ['direct']);
   });
 
   it('gives restriction evidence precedence over a PDF candidate', async () => {
@@ -1238,7 +1240,7 @@ describe('SciHub controlled adapter', () => {
     });
 
     await expect(searcher.search('10.1000/not-found-body')).resolves.toEqual([]);
-    expect(strategies).toEqual(['direct']);
+    expect(strategies).toEqual(['direct', 'static']);
   });
 
   it('does not use an ordinary iframe or unknown status to authorize browser escalation', async () => {
@@ -1397,7 +1399,7 @@ describe('SciHub controlled adapter', () => {
     });
 
     await expect(searcher.search('10.1000/incomplete-marker')).resolves.toEqual([]);
-    expect(strategies).toHaveLength(5);
+    expect(strategies).toHaveLength(10);
     expect(strategies).not.toContain('browser');
   });
 

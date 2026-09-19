@@ -98,6 +98,65 @@ describe('ScrapingAntProvider', () => {
     expect(body.destroyed).toBe(true);
   });
 
+  it('maps the bounded Markdown contract without exposing provider fields', async () => {
+    const request = requestFor({
+      markdown: '# Public paper',
+      status_code: 200,
+      url: 'https://attacker.example/observed',
+      cookies: 'session=secret',
+      headers: [{ name: 'Set-Cookie', value: 'secret' }],
+      xhrs: [{ url: 'https://attacker.example/xhr' }]
+    }, 200, { 'Ant-credits-cost': '3', 'Ant-page-status-code': '200' });
+    const provider = new ScrapingAntProvider({ apiKey: 'secret-key', client: { request } });
+
+    const result = await provider.retrieve({
+      url: 'https://publisher.example/article',
+      purpose: 'publisher_discovery',
+      strategy: 'static',
+      documentFormat: 'markdown'
+    }, context());
+
+    expect(result).toMatchObject({
+      apiStatus: 200,
+      targetStatus: 200,
+      cost: { known: true, credits: 3 },
+      document: { kind: 'markdown', markdown: '# Public paper' }
+    });
+    expect(request.mock.calls[0][0].url).toBe('https://api.scrapingant.com/v2/markdown');
+    expect(JSON.stringify(result)).not.toContain('attacker.example');
+    expect(JSON.stringify(result)).not.toContain('session=secret');
+  });
+
+  it('rejects empty or malformed Markdown payloads without treating HTML as Markdown', async () => {
+    for (const data of [
+      { html: '<html>not markdown</html>', status_code: 200 },
+      { markdown: '', status_code: 200 },
+      { markdown: '# missing target status' }
+    ]) {
+      const request = requestFor(data, 200, { 'Ant-credits-cost': '1' });
+      const provider = new ScrapingAntProvider({ apiKey: 'key', client: { request } });
+      await expect(provider.retrieve({
+        url: 'https://publisher.example/article',
+        purpose: 'publisher_discovery',
+        strategy: 'static',
+        documentFormat: 'markdown'
+      }, context())).rejects.toMatchObject({ code: expect.any(String) });
+    }
+  });
+
+  it('keeps Markdown static and datacenter only', async () => {
+    const request = requestFor({ markdown: '# text', status_code: 200 }, 200, { 'Ant-credits-cost': '1' });
+    const provider = new ScrapingAntProvider({ apiKey: 'key', client: { request } });
+    await expect(provider.retrieve({
+      url: 'https://publisher.example/article',
+      purpose: 'publisher_discovery',
+      strategy: 'browser',
+      proxyType: 'datacenter',
+      documentFormat: 'markdown'
+    }, context())).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('maps General and Extended contracts while separating API and page status', async () => {
     const generalRequest = requestFor({ html: '<html>general</html>', status_code: 201 }, 200, {
       'Ant-credits-cost': '1',

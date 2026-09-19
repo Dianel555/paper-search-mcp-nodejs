@@ -59,6 +59,7 @@ export const API_ENDPOINTS = {
   WOS_EXPANDED: 'https://api.clarivate.com/api/wos',
   SCRAPINGANT_GENERAL: 'https://api.scrapingant.com/v2/general',
   SCRAPINGANT_EXTENDED: 'https://api.scrapingant.com/v2/extended',
+  SCRAPINGANT_MARKDOWN: 'https://api.scrapingant.com/v2/markdown',
   SPRINGER_META: 'https://api.springernature.com/meta/v2',
   SPRINGER_OA: 'https://api.springernature.com/openaccess',
   ELSEVIER: 'https://api.elsevier.com',

@@ -11,6 +11,7 @@ export type OutboundPurpose =
   | 'scholar_search'
   | 'scihub_lookup'
   | 'scihub_download'
+  | 'pdf_download'
   | 'pdf_probe';
 
 export interface OutboundSecurityPolicyOptions extends PublicUrlValidationOptions {

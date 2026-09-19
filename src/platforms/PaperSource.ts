@@ -9,9 +9,13 @@ import { ErrorHandler, ApiError } from '../utils/ErrorHandler.js';
 import { logDebug } from '../utils/Logger.js';
 import type { RetrievalOperationContext } from '../retrieval/types.js';
 
+export type SciHubEntrypointProfile = 'search_scihub' | 'legacy_download' | 'public_download' | 'markdown';
+
 export interface SearchOptions {
   /** Internal MCP composition context; never accepted from tool arguments. */
   operationContext?: RetrievalOperationContext;
+  /** Internal Sci-Hub ledger profile; never accepted from MCP arguments. */
+  entrypointProfile?: SciHubEntrypointProfile;
   /** 最大结果数量 */
   maxResults?: number;
   /** 年份过滤 */
@@ -49,6 +53,8 @@ export interface SearchOptions {
 export interface DownloadOptions {
   /** Internal MCP composition context; never accepted from tool arguments. */
   operationContext?: RetrievalOperationContext;
+  /** Internal Sci-Hub ledger profile; never accepted from MCP arguments. */
+  entrypointProfile?: SciHubEntrypointProfile;
   /** 保存路径 */
   savePath?: string;
   /** 是否覆盖现有文件 */

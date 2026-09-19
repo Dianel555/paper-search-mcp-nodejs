@@ -4,7 +4,7 @@ import { RetrievalService, type RetrievalServiceOptions } from './RetrievalServi
 import { ScrapingAntProvider } from './ScrapingAntProvider.js';
 import { parseRetrievalConfiguration, type RetrievalConfiguration } from './Configuration.js';
 import type { OutboundPurpose } from './OutboundSecurityPolicy.js';
-import type { RetrievalProvider } from './types.js';
+import type { RetrievalProvider, RetrievalTransportProfile } from './types.js';
 import type { PublicHttpResponse } from '../services/PublicHttpClient.js';
 
 export type RetrievalDirectClient = {
@@ -15,6 +15,7 @@ export interface CreateRetrievalServiceOptions {
   directProvider?: RetrievalProvider;
   directClient?: RetrievalDirectClient;
   directClients?: Partial<Record<OutboundPurpose, RetrievalDirectClient>>;
+  directClientsByProfile?: Partial<Record<RetrievalTransportProfile, RetrievalDirectClient>>;
   scrapingAntProvider?: RetrievalProvider;
   securityPolicy?: RetrievalServiceOptions['securityPolicy'];
   configuration?: RetrievalConfiguration;
@@ -29,7 +30,8 @@ export function createRetrievalService(options: CreateRetrievalServiceOptions = 
   return new RetrievalService({
     directProvider: options.directProvider || new DirectHttpProvider({
       publicHttpClient: options.directClient,
-      publicHttpClients: options.directClients
+      publicHttpClients: options.directClients,
+      publicHttpClientsByProfile: options.directClientsByProfile
     }),
     scrapingAntProvider: options.scrapingAntProvider || new ScrapingAntProvider(),
     securityPolicy: options.securityPolicy,

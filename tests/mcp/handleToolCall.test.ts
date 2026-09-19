@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
+import * as path from 'node:path';
 import { handleToolCall } from '../../src/mcp/handleToolCall.js';
 import { PaperFactory, type Paper } from '../../src/models/Paper.js';
 import { CitationService } from '../../src/services/CitationService.js';
@@ -82,6 +83,63 @@ describe('handleToolCall savePath guard', () => {
     expect(searcher.downloadPdf).toHaveBeenCalledWith('2301.00123', expect.objectContaining({
       operationContext: operation
     }));
+  });
+
+  it('routes the independent public-paper and Markdown tools through one business service', async () => {
+    const publicPaper = {
+      download: jest.fn(async (input: any) => ({
+        platform: input.platform,
+        normalizedPaperId: input.paperId,
+        status: 'downloaded',
+        diagnostics: { phase: 'download', reason: 'downloaded', apiStatus: null, targetStatus: null, strategy: null, candidateCount: 1 },
+        cost: { attempted: false, known: true, credits: 0 },
+        filePath: '/safe/paper.pdf'
+      })),
+      markdown: jest.fn(async (input: any) => ({
+        platform: input.platform,
+        normalizedPaperId: input.paperId,
+        status: 'ok',
+        diagnostics: { phase: 'markdown', reason: 'ok', apiStatus: 200, targetStatus: 200, strategy: 'static', candidateCount: 0 },
+        cost: { attempted: true, known: true, credits: 1 },
+        markdown: '# untrusted',
+        untrusted: true
+      }))
+    };
+    const operation = {
+      operationId: 'public-paper-operation',
+      signal: new AbortController().signal,
+      deadlineAt: Date.now() + 60_000,
+      remainingMs: () => 60_000,
+      cost: {} as any
+    };
+    const searchers = makeSearchers({ publicPaper }) as any;
+    const download = await handleToolCall('download_public_paper', {
+      platform: 'publisher', paperId: '10.1000/test', savePath: 'public-tool-test'
+    }, searchers, operation);
+    const markdown = await handleToolCall('get_paper_markdown', {
+      platform: 'publisher', paperId: '10.1000/test'
+    }, searchers, operation);
+
+    expect(JSON.parse(download.content[0].text).status).toBe('downloaded');
+    expect(JSON.parse(markdown.content[0].text).markdown).toBe('# untrusted');
+    expect(publicPaper.download).toHaveBeenCalledWith(expect.objectContaining({ operation }));
+    expect(publicPaper.markdown).toHaveBeenCalledWith(expect.objectContaining({ operation }));
+  });
+
+  it('resolves the public-paper default save directory exactly once', async () => {
+    const publicPaper = {
+      download: jest.fn(async () => ({
+        platform: 'publisher', normalizedPaperId: '10.1000/test', status: 'downloaded',
+        diagnostics: { phase: 'download', reason: 'downloaded', apiStatus: null, targetStatus: null, strategy: null, candidateCount: 1 },
+        cost: { attempted: false, known: true, credits: 0 }, filePath: '/safe/paper.pdf'
+      }))
+    };
+    const operation = {
+      operationId: 'public-default-path', signal: new AbortController().signal,
+      deadlineAt: Date.now() + 60_000, remainingMs: () => 60_000, cost: {} as any
+    };
+    await handleToolCall('download_public_paper', { platform: 'publisher', paperId: '10.1000/test' }, makeSearchers({ publicPaper }) as any, operation);
+    expect(publicPaper.download).toHaveBeenCalledWith(expect.objectContaining({ saveDirectory: path.resolve('./downloads') }));
   });
 
   it('should reject an unsupported platform in download_paper', async () => {

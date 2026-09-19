@@ -112,7 +112,6 @@ profile-*
 
 #claude
 .claude/
-claudedocs/
 
 #Pi
 .pi/
@@ -130,6 +129,7 @@ test-results/
 test-*.js
 
 # Local development files
+docs/
 scratch/
 temp/
 benchmark.md

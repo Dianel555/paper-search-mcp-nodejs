@@ -220,6 +220,27 @@ describe('PublicHttpClient', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects credential-bearing PDF redirect hops before the next dispatch', async () => {
+    const request = jest.fn(async (config: any) => {
+      if (config.url === 'https://source.example/start') {
+        return { status: 302, headers: { location: 'https://cdn.example/file.pdf?token=secret' }, data: undefined };
+      }
+      return { status: 200, headers: { 'content-type': 'application/pdf' }, data: Buffer.from('%PDF-1.7') };
+    });
+    const client = new PublicHttpClient({
+      client: { request },
+      purpose: 'pdf_download',
+      validateUrl: async (url: string) => ({
+        url,
+        hostname: new URL(url).hostname,
+        addresses: [{ address: '93.184.216.34', family: 4 }]
+      })
+    });
+
+    await expect(client.request('https://source.example/start')).rejects.toMatchObject({ name: 'SensitiveOutboundTargetError' });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('cancels a stalled initial target validation before dispatch', async () => {
     let releaseValidation!: (value: PublicUrlValidation) => void;
     let validationStarted!: () => void;

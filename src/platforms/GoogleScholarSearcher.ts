@@ -402,6 +402,7 @@ export class GoogleScholarSearcher extends PaperSource {
       strategy,
       proxyType,
       documentFormat: 'html' as const,
+      transportProfile: 'scholar_session' as const,
       signal: operation.signal
     });
     const process = this.retrievalService.getProcessStatus();

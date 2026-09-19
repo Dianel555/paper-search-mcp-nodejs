@@ -40,7 +40,6 @@ jest.config.*
 
 #Claude
 .claude/
-claudedocs/
 
 #Pi
 .pi/
@@ -68,6 +67,7 @@ pids/
 *.cache
 
 # Temporary files
+docs/
 tmp/
 temp/
 scratch/

@@ -185,10 +185,16 @@ describe('MCP retrieval composition', () => {
     expect(server.setRequestHandler).toHaveBeenCalledTimes(4);
   });
 
-  it('keeps the tools/list registry aligned with the new discovery handler', () => {
+  it('keeps the tools/list registry aligned with the public-paper handlers', () => {
     const names = new Set(TOOLS.map(tool => tool.name));
     expect(names.has('discover_paper_access')).toBe(true);
-    expect(TOOLS.filter(tool => tool.name === 'discover_paper_access')).toHaveLength(1);
+    expect(names.has('download_public_paper')).toBe(true);
+    expect(names.has('get_paper_markdown')).toBe(true);
+    expect(TOOLS.filter(tool => tool.name === 'download_public_paper')).toHaveLength(1);
+    expect(TOOLS.filter(tool => tool.name === 'get_paper_markdown')).toHaveLength(1);
+    const download = TOOLS.find(tool => tool.name === 'download_public_paper') as any;
+    expect(download.inputSchema.additionalProperties).toBe(false);
+    expect(download.inputSchema.properties.platform.enum).toEqual(['publisher', 'googlescholar', 'scihub']);
   });
 
   it('advertises the exact get_paper_by_doi platform contract through tools/list', async () => {
@@ -271,6 +277,21 @@ describe('MCP retrieval composition', () => {
     expect(lookups.get('crossref')).toHaveBeenCalledTimes(2);
     expect(operations).toHaveLength(5);
     expect(operations.every(operation => operation.dispose.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('rejects missing Scholar references before creating an operation or searchers', async () => {
+    const searcherFactory = jest.fn(() => makeSearchers());
+    const handler = createCallToolHandler(searcherFactory);
+    const response = await handler(
+      { params: { name: 'get_paper_markdown', arguments: { platform: 'googlescholar', paperId: 'gs_missing_ref' } } },
+      { signal: new AbortController().signal }
+    );
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      status: 'reference_unavailable',
+      cost: { attempted: false, known: true, credits: 0 }
+    });
+    expect(response.isError).toBeUndefined();
+    expect(searcherFactory).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported DOI inputs before creating an operation', async () => {
