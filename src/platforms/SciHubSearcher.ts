@@ -561,6 +561,7 @@ export class SciHubSearcher extends PaperSource {
   ): Promise<LookupOutcome> {
     const landingUrl = buildMirrorLandingUrl(mirrorUrl, doi);
     const paidEnabled = this.retrievalService.getProcessStatus().enabled;
+    let paidStaticAttempted = false;
     const request = (strategy: 'direct' | 'static' | 'browser') => ({
       url: landingUrl,
       purpose: 'scihub_lookup' as const,
@@ -580,8 +581,12 @@ export class SciHubSearcher extends PaperSource {
         },
         {
           request: request('static'),
-          shouldAttempt: async state => paidEnabled && (await this.needsSciHubFallback(state.previousResponse, operation.signal, entrypointProfile)
-            || isSciHubFallbackError(state.previousError)),
+          shouldAttempt: async state => {
+            const shouldAttempt = paidEnabled && (await this.needsSciHubFallback(state.previousResponse, operation.signal, entrypointProfile)
+              || isSciHubFallbackError(state.previousError));
+            if (shouldAttempt) paidStaticAttempted = true;
+            return shouldAttempt;
+          },
           isTerminalResponse: async response => !(await this.needsSciHubBrowser(response, operation.signal))
         },
         {
@@ -599,6 +604,9 @@ export class SciHubSearcher extends PaperSource {
       return await this.classifyRetrievalLookup(response, doi, landingUrl, mirrorUrl, operation);
     } catch (error) {
       const terminal = isTerminalSciHubRetrievalError(error);
+      if (paidStaticAttempted && isSciHubPaidRetryExhaustion(error)) {
+        operation.cost.close('provider_error');
+      }
       const mirrorFailure = !operation.signal.aborted && !terminal && isMirrorHealthRelevantError(error);
       return {
         status: terminal && error instanceof RetrievalError && error.code === 'security' ? 'blocked' : 'transport_error',
@@ -1116,6 +1124,11 @@ function hasPdfEvidence(response: RetrievalResponse): boolean {
 
 function isSciHubFallbackError(error: RetrievalError | undefined): boolean {
   return Boolean(error && ['network', 'server_error', 'timeout'].includes(error.code));
+}
+
+function isSciHubPaidRetryExhaustion(error: unknown): error is RetrievalError {
+  return error instanceof RetrievalError
+    && ['network', 'server_error', 'timeout', 'detected'].includes(error.code);
 }
 
 function isTerminalSciHubRetrievalError(error: unknown): boolean {

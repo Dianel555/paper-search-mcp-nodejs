@@ -11,6 +11,9 @@ import {
 } from '../../src/platforms/SciHubSearcher.js';
 import { PublicHttpClient } from '../../src/services/PublicHttpClient.js';
 import { ScrapingAntFetcher } from '../../src/services/ScrapingAntFetcher.js';
+import { RetrievalCostPolicy } from '../../src/retrieval/RetrievalCostPolicy.js';
+import { parseRetrievalConfiguration } from '../../src/retrieval/Configuration.js';
+import { RetrievalService } from '../../src/retrieval/RetrievalService.js';
 import { RetrievalError, type RetrievalOperationContext, type RetrievalResponse } from '../../src/retrieval/types.js';
 import { OutboundSecurityPolicy } from '../../src/retrieval/OutboundSecurityPolicy.js';
 import type { RetrievalStrategyStep } from '../../src/retrieval/RetrievalService.js';
@@ -1158,6 +1161,71 @@ describe('SciHub controlled adapter', () => {
 
     await expect(searcher.search('10.1000/not-found')).resolves.toEqual([]);
     expect(strategies).toEqual(['direct', 'static']);
+  });
+
+  it.each(['network', 'detected'] as const)('closes the shared paid ledger after Sci-Hub %s static retries exhaust before trying another mirror', async failureCode => {
+    let directDispatches = 0;
+    let paidDispatches = 0;
+    const configuration = parseRetrievalConfiguration({
+      SCRAPINGANT_API_KEY: 'test-key',
+      SCRAPINGANT_ENABLED: 'true'
+    });
+    const retrievalService = new RetrievalService({
+      directProvider: {
+        name: 'direct',
+        capabilities: { html: true, iframeDocuments: true, pdfCandidates: true, browser: false, paid: false },
+        retrieve: async () => {
+          directDispatches++;
+          return sciHubResponse('direct', '<html>ordinary page</html>');
+        }
+      },
+      scrapingAntProvider: {
+        name: 'scrapingant',
+        capabilities: { html: true, iframeDocuments: true, pdfCandidates: true, browser: false, paid: true },
+        retrieve: async () => {
+          paidDispatches++;
+          throw new RetrievalError({
+            code: failureCode,
+            message: 'provider unavailable',
+            provider: 'scrapingant',
+            ...(failureCode === 'detected' ? { status: 423 } : {}),
+            retryable: true,
+            cost: { known: true, credits: 1 }
+          });
+        }
+      },
+      configuration,
+      costPolicy: new RetrievalCostPolicy({ budget: 50, maxCreditsPerRequest: 10, enabled: true }),
+      securityPolicy: new OutboundSecurityPolicy({ validatePublicUrl: validateUrl }),
+      retrySleep: async () => undefined,
+      retryRandom: () => 0
+    });
+    const searcher = new SciHubSearcher({
+      enabled: true,
+      mirrors: ['https://mirror-a.example', 'https://mirror-b.example'],
+      retrievalService,
+      mirrorDiscoveryHttpClient: {
+        request: jest.fn(async (url: string) => ({
+          response: { status: 200, headers: {}, data: '<html></html>' },
+          finalUrl: url
+        } as any))
+      },
+      healthHttpClient: healthyMirrorRequest(),
+      validateUrl
+    });
+    const operation = retrievalService.createOperation({ purpose: 'scihub_lookup' });
+
+    try {
+      await expect(searcher.search('10.1000/static-exhaustion', { operationContext: operation })).resolves.toEqual([]);
+      expect(directDispatches).toBeGreaterThan(1);
+      expect(paidDispatches).toBe(3);
+      expect(operation.cost.snapshot()).toEqual(expect.objectContaining({
+        paidClosed: true,
+        paidClosedReason: 'provider_error'
+      }));
+    } finally {
+      operation.dispose();
+    }
   });
 
   it.each([423, 429])('keeps restricted target status %s on the direct path without crossing mirrors or paid fallback', async targetStatus => {
